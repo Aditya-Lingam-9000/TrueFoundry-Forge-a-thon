@@ -1,0 +1,43 @@
+{
+  "_comment": "Model providers for TrueForge. Copy to config/models.json (git-ignored), fill in base URLs, and export the keys referenced as ${ENV_VAR}; then run: node scripts/register-models.mjs. Keys are never written to this repository. Any OpenAI-compatible endpoint works as a `custom` provider; native types (openai, anthropic, google-gemini, zai, ...) work too.",
+  "providers": [
+    {
+      "type": "custom",
+      "name": "kaggle-t4x2",
+      "base_url": "https://<your-session>.trycloudflare.com/v1",
+      "auth": { "api_key": "${FORGE_API_KEY}" },
+      "models": [
+        {
+          "model_id": "qwen3-coder:30b",
+          "name": "qwen3-coder-30b",
+          "properties": { "context_length": 49152, "max_output_tokens": 8192 }
+        }
+      ]
+    },
+    {
+      "type": "custom",
+      "name": "kaggle-tpu",
+      "base_url": "https://<your-session>.trycloudflare.com/v1",
+      "auth": { "api_key": "${FORGE_API_KEY}" },
+      "models": [
+        {
+          "model_id": "qwen3.8-27b",
+          "name": "qwen3-8-27b",
+          "properties": { "context_length": 131072, "max_output_tokens": 16384 }
+        }
+      ]
+    },
+    {
+      "type": "custom",
+      "name": "local-ollama",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "models": [
+        {
+          "model_id": "qwen3-coder:30b",
+          "name": "qwen3-coder-30b",
+          "properties": { "context_length": 32768, "max_output_tokens": 8192 }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "name": "forge-agent",
+  "displayName": "Forge Agent",
+  "description": "An editor-native coding agent whose agent loop runs on TrueForge — built by THE AGENTIC ORDER for the TrueFoundry Forge-a-thon (Techfest 2026-27, IIT Bombay).",
+  "version": "0.1.0",
+  "publisher": "the-agentic-order",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Aditya-Lingam-9000/TrueFoundry-Forge-a-thon"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "forgeAgent",
+          "title": "Forge Agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "forgeAgent": [
+        {
+          "type": "webview",
+          "id": "forgeAgent.panel",
+          "name": "Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "forgeAgent.newSession",
+        "title": "Forge Agent: New Session"
+      },
+      {
+        "command": "forgeAgent.stop",
+        "title": "Forge Agent: Stop Generation"
+      },
+      {
+        "command": "forgeAgent.openSessionInTrueForge",
+        "title": "Forge Agent: Open Session in TrueForge"
+      },
+      {
+        "command": "forgeAgent.reconnect",
+        "title": "Forge Agent: Reconnect to TrueForge"
+      },
+      {
+        "command": "forgeAgent.showLog",
+        "title": "Forge Agent: Show Log"
+      }
+    ],
+    "configuration": {
+      "title": "Forge Agent",
+      "properties": {
+        "forgeAgent.trueforgeUrl": {
+          "type": "string",
+          "default": "http://localhost:8790",
+          "description": "Base URL of the local TrueForge server (npx @truefoundry/trueforge)."
+        },
+        "forgeAgent.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model as `<provider>/<model>` configured in TrueForge (e.g. kaggle-t4x2/qwen3-coder-30b). Empty = the model in the agent definition."
+        },
+        "forgeAgent.agentDefinition": {
+          "type": "string",
+          "default": "",
+          "description": "Path to an agent definition JSON. Empty = the bundled agent/forge-agent.json."
+        },
+        "forgeAgent.mcpServerName": {
+          "type": "string",
+          "default": "forge-editor",
+          "description": "Name under which the extension's editor MCP server is registered in TrueForge."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run compile"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "@types/vscode": "1.90.0",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}

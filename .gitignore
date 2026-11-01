@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.vsix
+.DS_Store
+
+# never commit secrets: real model configs and env files stay local
+.env
+.env.*
+config/models.json
+*.local.json
