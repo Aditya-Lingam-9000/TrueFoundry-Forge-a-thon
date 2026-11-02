@@ -12,7 +12,94 @@
 
   const bubbles = new Map(); // messageId -> { el, text, reasoningEl, reasoning }
   const toolCards = new Map(); // callId -> element
+  const reviewCards = new Map(); // callId -> element
+  const approvalCards = new Map(); // callId -> element
+  const appliedCards = new Map(); // changeId -> element
   let busy = false;
+
+  const REVIEW_LABEL = {
+    pending: 'waiting for your review in the editor',
+    accepted: 'accepted',
+    partial: 'partly accepted',
+    rejected: 'rejected — nothing written',
+    invalid: 'could not be prepared — sent back to the agent',
+    cancelled: 'cancelled — nothing written',
+  };
+
+  function button(label, cls, onClick) {
+    const b = el('button', cls, label);
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function renderReview(m) {
+    let card = reviewCards.get(m.callId);
+    if (!card) {
+      card = el('div', 'card review');
+      reviewCards.set(m.callId, card);
+      log.appendChild(card);
+    }
+    card.className = 'card review ' + m.state;
+    card.textContent = '';
+    const title = el('div', 'card-title');
+    title.appendChild(el('span', null, '📝 ' + m.path));
+    if (m.hunks) title.appendChild(el('span', 'muted', '  ' + m.hunks + ' hunk(s) · +' + m.added + ' −' + m.removed));
+    card.appendChild(title);
+    card.appendChild(el('div', 'card-state', REVIEW_LABEL[m.state] || m.state));
+    if (m.detail) card.appendChild(el('div', 'card-detail', m.detail));
+    if (m.state === 'pending') {
+      const row = el('div', 'row');
+      row.appendChild(button('Open review', '', () => vscode.postMessage({ type: 'openReview', callId: m.callId })));
+      card.appendChild(row);
+    }
+  }
+
+  function renderApproval(m) {
+    let card = approvalCards.get(m.callId);
+    if (!card) {
+      card = el('div', 'card approval');
+      approvalCards.set(m.callId, card);
+      log.appendChild(card);
+    }
+    card.className = 'card approval ' + m.state;
+    card.textContent = '';
+    card.appendChild(el('div', 'card-title', '⚡ ' + m.title));
+    card.appendChild(el('pre', 'card-command', m.detail));
+    if (m.state === 'pending') {
+      const row = el('div', 'row');
+      row.appendChild(button('Allow', '', () => vscode.postMessage({ type: 'approve', callId: m.callId, allow: true })));
+      row.appendChild(button('Deny', 'secondary', () => vscode.postMessage({ type: 'approve', callId: m.callId, allow: false })));
+      card.appendChild(row);
+    } else {
+      card.appendChild(el('div', 'card-state', m.state));
+    }
+  }
+
+  function renderApplied(m) {
+    for (const c of appliedCards.values()) {
+      const b = c.querySelector('button');
+      if (b) b.remove(); // only the most recent change can be reverted
+    }
+    const card = el('div', 'card applied');
+    card.appendChild(el('div', 'card-title', '✅ ' + m.path));
+    card.appendChild(el('div', 'card-detail', m.summary));
+    const row = el('div', 'row');
+    row.appendChild(button('Revert this change', 'secondary', () => vscode.postMessage({ type: 'revert', changeId: m.changeId })));
+    card.appendChild(row);
+    appliedCards.set(m.changeId, card);
+    log.appendChild(card);
+  }
+
+  function renderReverted(m) {
+    const card = appliedCards.get(m.changeId);
+    if (card) {
+      card.className = 'card applied reverted';
+      const b = card.querySelector('button');
+      if (b) b.remove();
+      card.appendChild(el('div', 'card-state', '↩ reverted'));
+    }
+    appliedCards.delete(m.changeId);
+  }
 
   function scrollDown() {
     log.scrollTop = log.scrollHeight;
@@ -128,6 +215,18 @@
         if (m.isError) card.classList.add('error');
         break;
       }
+      case 'review':
+        renderReview(m);
+        break;
+      case 'approval':
+        renderApproval(m);
+        break;
+      case 'applied':
+        renderApplied(m);
+        break;
+      case 'reverted':
+        renderReverted(m);
+        break;
       case 'status':
         setStatus(m.kind, m.text);
         if (m.kind === 'error') log.appendChild(el('div', 'msg error', m.text));
@@ -142,6 +241,9 @@
           log.textContent = '';
           bubbles.clear();
           toolCards.clear();
+          reviewCards.clear();
+          approvalCards.clear();
+          appliedCards.clear();
           log.appendChild(el('div', 'hint', 'New session. Ask anything about the open repository.'));
           setStatus('info', '');
         }

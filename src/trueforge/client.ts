@@ -19,6 +19,15 @@ export interface ToolCallDelta {
   function?: { name?: string; arguments?: string };
 }
 
+export type TurnInput =
+  | { type: 'user.message'; content: string }
+  | {
+      type: 'user.tool_approval';
+      thread_id: string;
+      tool_call_id: string;
+      approval: { status: 'allow' } | { status: 'deny'; reason?: string };
+    };
+
 export interface RemoteMcpServerManifest {
   type: 'remote';
   name: string;
@@ -94,18 +103,28 @@ export class TrueForgeClient {
     await this.request('POST', `/api/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, {});
   }
 
+  /** Events of one turn (deltas already merged), oldest first. */
+  async turnEvents(sessionId: string, turnId: string): Promise<TurnEvent[]> {
+    const res = await this.request<{ data?: TurnEvent[] }>(
+      'GET',
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/events?order=asc&limit=500`,
+    );
+    return res?.data ?? [];
+  }
+
   /**
-   * Start a turn with a user message and yield its events as they stream in (SSE). Ends after
-   * `turn.done` or when the stream closes. `signal` aborts the HTTP stream (the turn itself is
-   * cancelled with cancel()).
+   * Start a turn and yield its events as they stream in (SSE). `input` is a user message or the
+   * batch of approval decisions answering a `tool.approval_required`. Ends after `turn.done` or
+   * when the stream closes. `signal` aborts the HTTP stream (the turn itself is cancelled with
+   * cancel()).
    */
-  async *streamTurn(sessionId: string, text: string, signal: AbortSignal): AsyncGenerator<TurnEvent> {
+  async *streamTurn(sessionId: string, input: TurnInput[], signal: AbortSignal): AsyncGenerator<TurnEvent> {
     let res: Response;
     try {
       res = await fetch(this.url(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-        body: JSON.stringify({ input: [{ type: 'user.message', content: text }], stream: true }),
+        body: JSON.stringify({ input, stream: true }),
         signal,
       });
     } catch (err) {

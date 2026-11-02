@@ -3,7 +3,10 @@
  * protected by a per-launch bearer token. TrueForge connects to it at the start of every turn,
  * so the agent — not the extension — decides what to read.
  *
- * Milestone 1 tools (read-only): list_files, read_file, search_code.
+ * Read-only tools: list_files, read_file, search_code.
+ * Gated tools (TrueForge pauses for approval before running them):
+ *   propose_write — the user reviews the change hunk by hunk in the editor; only accepted hunks are written
+ *   run_command   — the user approves the exact command in the agent panel
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -13,7 +16,20 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import * as vscode from 'vscode';
 import * as z from 'zod';
+import type { ChangeController } from '../review/changeController';
+import type { CommandRunner } from './commandRunner';
 import { EXCLUDE_GLOB, resolveInWorkspace, searchWorkspace, toRel } from './workspace';
+
+export interface EditorToolDeps {
+  log: (msg: string) => void;
+  changes: ChangeController;
+  commands: CommandRunner;
+}
+
+const EDIT_SCHEMA = z.object({
+  old_text: z.string().describe('Exact current text to replace (unique in the file)'),
+  new_text: z.string().describe('Replacement text'),
+});
 
 const MAX_READ_LINES = 400;
 const MAX_READ_CHARS = 40_000;
@@ -29,8 +45,9 @@ function fail(err: unknown): ToolResult {
 }
 
 /** Builds a fresh MCP server with the editor tools (stateless: one per HTTP request). */
-function buildServer(log: (msg: string) => void): McpServer {
-  const server = new McpServer({ name: 'forge-editor', version: '0.1.0' });
+function buildServer(deps: EditorToolDeps): McpServer {
+  const { log } = deps;
+  const server = new McpServer({ name: 'forge-editor', version: '0.2.0' });
 
   server.registerTool(
     'list_files',
@@ -143,6 +160,81 @@ function buildServer(log: (msg: string) => void): McpServer {
     },
   );
 
+  server.registerTool(
+    'propose_write',
+    {
+      title: 'Propose a file change',
+      description:
+        'Propose a change to ONE file. The user reviews it hunk by hunk in the editor and nothing is written until ' +
+        'they decide; the result says which hunks were applied or rejected.\n' +
+        'To change an existing file: read it first, then pass "old_text" = the EXACT current lines (copied from ' +
+        'read_file without the line numbers, same indentation, plus a few unchanged lines around them so they ' +
+        'match exactly once) and "new_text" = what those lines become. Example: ' +
+        '{"path": "src/app.py", "old_text": "def f():\\n    return 1\\n", "new_text": "def f():\\n    return 2\\n", ' +
+        '"description": "make f return 2"}.\n' +
+        'Several changes in the same file: "edits": [{"old_text": ..., "new_text": ...}, ...] (applied in order).\n' +
+        'To create a NEW file: "content" with the full text. Never use "content" to rewrite an existing file.\n' +
+        'Call it once per file; several files can be proposed in parallel.',
+      inputSchema: {
+        path: z.string().describe('Workspace-relative path of the file to change or create'),
+        old_text: z.string().optional().describe('Exact current lines to replace (must match exactly once)'),
+        new_text: z.string().optional().describe('Replacement for old_text'),
+        edits: z
+          .union([z.array(EDIT_SCHEMA), EDIT_SCHEMA, z.string()])
+          .optional()
+          .describe('Several changes in this file: a list of {old_text, new_text}'),
+        content: z.string().optional().describe('Full text, ONLY when creating a new file'),
+        description: z.string().optional().describe('One sentence: what this change does and why'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async args => {
+      try {
+        const result = await deps.changes.applyApproved(args);
+        log(`propose_write(${args.path}) -> applied`);
+        return ok(result);
+      } catch (err) {
+        log(`propose_write(${args.path}) -> ${err instanceof Error ? err.message : String(err)}`);
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'run_command',
+    {
+      title: 'Run a shell command',
+      description:
+        'Run a shell command in the workspace (for example tests: "uv run --frozen pytest tests/test_cli.py -q"). ' +
+        'The user approves the exact command first. Returns the exit code and the output (long output is trimmed). ' +
+        'Never use it to edit files: use propose_write.',
+      inputSchema: {
+        command: z.string().min(1).describe('The command line to run'),
+        cwd: z.string().optional().describe('Workspace-relative working directory (default: workspace root)'),
+        timeout_seconds: z.number().int().min(1).max(900).optional().describe('Default 180'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ command, cwd, timeout_seconds }, extra) => {
+      try {
+        const r = await deps.commands.run(command, cwd, timeout_seconds ?? 180, extra.signal);
+        log(`run_command(${command}) -> exit ${r.exitCode ?? 'killed'} in ${r.seconds.toFixed(1)} s`);
+        const status = r.timedOut
+          ? `timed out after ${timeout_seconds ?? 180} s`
+          : r.killed
+            ? 'stopped by the user'
+            : `exit code ${r.exitCode}`;
+        const result: ToolResult = {
+          content: [{ type: 'text', text: `$ ${command}\n[${status}, ${r.seconds.toFixed(1)} s]\n${r.output}` }],
+          isError: r.exitCode !== 0,
+        };
+        return result;
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
   return server;
 }
 
@@ -153,7 +245,8 @@ export interface EditorMcpEndpoint {
 }
 
 /** Start the MCP server on a free 127.0.0.1 port. */
-export async function startEditorMcpServer(log: (msg: string) => void): Promise<EditorMcpEndpoint> {
+export async function startEditorMcpServer(deps: EditorToolDeps): Promise<EditorMcpEndpoint> {
+  const { log } = deps;
   const token = randomBytes(24).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
 
@@ -190,7 +283,7 @@ export async function startEditorMcpServer(log: (msg: string) => void): Promise<
       return;
     }
 
-    const server = buildServer(log);
+    const server = buildServer(deps);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => {
       void transport.close();

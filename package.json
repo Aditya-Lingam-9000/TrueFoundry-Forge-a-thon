@@ -54,6 +54,10 @@
         "title": "Forge Agent: Open Session in TrueForge"
       },
       {
+        "command": "forgeAgent.revertLastChange",
+        "title": "Forge Agent: Revert Last Agent Change"
+      },
+      {
         "command": "forgeAgent.reconnect",
         "title": "Forge Agent: Reconnect to TrueForge"
       },
@@ -92,7 +96,8 @@
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run compile"
+    "test": "esbuild src/review/diff.test.ts src/review/edits.test.ts --bundle --platform=node --format=cjs --outdir=dist/test --log-level=warning && node --test dist/test/diff.test.js dist/test/edits.test.js",
+    "check": "npm run typecheck && npm run compile && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

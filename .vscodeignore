@@ -5,6 +5,7 @@ scripts/**
 config/**
 docs/**
 **/*.map
+dist/test/**
 tsconfig.json
 esbuild.mjs
 .gitignore

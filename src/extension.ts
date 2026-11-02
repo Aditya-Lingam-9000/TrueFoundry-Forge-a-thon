@@ -2,12 +2,16 @@
  * Forge Agent — a VS Code coding agent whose agent loop runs on TrueForge.
  *
  * On activation: start the editor MCP server (127.0.0.1, bearer token), register it in TrueForge,
- * and provide the agent panel. Each panel conversation is a TrueForge session; TrueForge runs the
- * loop and calls back into the editor through MCP.
+ * and provide the agent panel and the hunk-by-hunk review. Each panel conversation is a TrueForge
+ * session; TrueForge runs the loop, calls back into the editor through MCP, and pauses for the
+ * user's approval before any write or command.
  */
 import * as vscode from 'vscode';
 import { AgentSession, trueforgeUrl } from './agent/agentSession';
+import { CommandRunner } from './mcp/commandRunner';
 import { startEditorMcpServer, type EditorMcpEndpoint } from './mcp/editorServer';
+import { ChangeController } from './review/changeController';
+import { ReviewManager } from './review/reviewManager';
 import { errorMessage, TrueForgeClient } from './trueforge/client';
 import { AgentPanelProvider } from './ui/agentPanel';
 
@@ -15,18 +19,22 @@ let mcpEndpoint: EditorMcpEndpoint | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('Forge Agent');
-  context.subscriptions.push(output);
+  const commandOutput = vscode.window.createOutputChannel('Forge Agent: Commands');
+  context.subscriptions.push(output, commandOutput);
   const log = (msg: string): void => output.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
 
   const client = new TrueForgeClient(trueforgeUrl);
   let session: AgentSession | undefined;
-
   let ready = false; // the panel may resolve before activation finishes; announce() waits for this
+
   const panel = new AgentPanelProvider(context.extensionUri, {
     send: text => void session?.send(text),
     stop: () => void session?.stop(),
     newSession: () => void session?.reset(),
     openSession: () => openSessionInTrueForge(),
+    approve: (callId, allow) => session?.answerApproval(callId, allow),
+    openReview: callId => void reviews.open(callId),
+    revert: changeId => void revert(changeId),
     ready: () => {
       if (ready) {
         void announce();
@@ -39,8 +47,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
+  const reviews = new ReviewManager();
+  reviews.register(context);
+  const changes = new ChangeController(e => {
+    if (e.type === 'applied') {
+      const c = e.change;
+      panel.post({
+        type: 'applied',
+        changeId: c.id,
+        path: c.rel,
+        summary:
+          `${c.acceptedHunks}/${c.totalHunks} hunk(s) written (+${c.added} −${c.removed})` +
+          (c.before === null ? ' · new file' : '') +
+          ' · Cmd/Ctrl+Z in the file or "Revert this change" undoes it',
+      });
+    } else {
+      panel.post({ type: 'reverted', changeId: e.change.id, path: e.change.rel });
+    }
+  }, log);
+  const commands = new CommandRunner(commandOutput);
+
   try {
-    mcpEndpoint = await startEditorMcpServer(log);
+    mcpEndpoint = await startEditorMcpServer({ log, changes, commands });
   } catch (err) {
     const msg = `Forge Agent could not start its editor MCP server: ${errorMessage(err)}`;
     log(msg);
@@ -49,7 +77,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
   const endpoint = mcpEndpoint;
-  session = new AgentSession(client, endpoint, context.extensionPath, msg => panel.post(msg), log);
+  session = new AgentSession({
+    client,
+    mcp: endpoint,
+    reviews,
+    changes,
+    commands,
+    extensionPath: context.extensionPath,
+    post: msg => panel.post(msg),
+    log,
+  });
   const agent = session;
   ready = true;
 
@@ -75,6 +112,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }
 
+  async function revert(changeId?: string): Promise<void> {
+    const msg = await changes.revert(changeId);
+    log(msg);
+    void vscode.window.showInformationMessage(msg);
+  }
+
   function openSessionInTrueForge(): void {
     const url = agent.sessionUrl();
     if (url) {
@@ -88,6 +131,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('forgeAgent.newSession', () => agent.reset()),
     vscode.commands.registerCommand('forgeAgent.stop', () => agent.stop()),
     vscode.commands.registerCommand('forgeAgent.openSessionInTrueForge', openSessionInTrueForge),
+    vscode.commands.registerCommand('forgeAgent.revertLastChange', () => revert()),
     vscode.commands.registerCommand('forgeAgent.reconnect', () => announce()),
     vscode.commands.registerCommand('forgeAgent.showLog', () => output.show()),
     vscode.workspace.onDidChangeConfiguration(e => {

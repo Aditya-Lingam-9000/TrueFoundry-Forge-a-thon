@@ -110,6 +110,56 @@ pre.tool-result.pending {
 pre.tool-result.error {
   color: var(--vscode-errorForeground);
 }
+.card {
+  border: 1px solid var(--vscode-panel-border);
+  border-left: 3px solid var(--vscode-textLink-foreground);
+  border-radius: 4px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.card .row {
+  margin-top: 2px;
+}
+.card-title {
+  font-weight: 600;
+  word-break: break-all;
+}
+.card-state {
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+.card-detail {
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  opacity: 0.85;
+}
+pre.card-command {
+  font-family: var(--vscode-editor-font-family);
+  margin: 0;
+  padding: 4px;
+  white-space: pre-wrap;
+  background: var(--vscode-textCodeBlock-background);
+}
+.card.pending {
+  border-left-color: var(--vscode-editorWarning-foreground, #cca700);
+}
+.card.accepted,
+.card.allowed,
+.card.applied {
+  border-left-color: var(--vscode-testing-iconPassed, #3fb950);
+}
+.card.partial {
+  border-left-color: var(--vscode-editorWarning-foreground, #cca700);
+}
+.card.rejected,
+.card.denied,
+.card.invalid,
+.card.cancelled,
+.card.reverted {
+  border-left-color: var(--vscode-errorForeground);
+}
 textarea {
   width: 100%;
   box-sizing: border-box;

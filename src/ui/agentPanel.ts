@@ -1,7 +1,6 @@
 /**
  * The agent panel (a webview view in the Forge Agent activity-bar container).
- * Webview → extension: { type: 'send', text } | { type: 'stop' } | { type: 'newSession' } | { type: 'openSession' } | { type: 'ready' }
- * Extension → webview: PanelMessage (see agentSession.ts).
+ * Webview → extension: FromWebview below. Extension → webview: PanelMessage (see agentSession.ts).
  */
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -12,6 +11,9 @@ type FromWebview =
   | { type: 'stop' }
   | { type: 'newSession' }
   | { type: 'openSession' }
+  | { type: 'approve'; callId: string; allow: boolean }
+  | { type: 'openReview'; callId: string }
+  | { type: 'revert'; changeId: string }
   | { type: 'ready' };
 
 export interface PanelHandlers {
@@ -19,6 +21,9 @@ export interface PanelHandlers {
   stop(): void;
   newSession(): void;
   openSession(): void;
+  approve(callId: string, allow: boolean): void;
+  openReview(callId: string): void;
+  revert(changeId: string): void;
   ready(): void;
 }
 
@@ -52,6 +57,15 @@ export class AgentPanelProvider implements vscode.WebviewViewProvider {
           break;
         case 'openSession':
           this.handlers.openSession();
+          break;
+        case 'approve':
+          this.handlers.approve(msg.callId, msg.allow);
+          break;
+        case 'openReview':
+          this.handlers.openReview(msg.callId);
+          break;
+        case 'revert':
+          this.handlers.revert(msg.changeId);
           break;
         case 'ready': {
           const pending = this.backlog;
@@ -106,8 +120,9 @@ export class AgentPanelProvider implements vscode.WebviewViewProvider {
     <button id="new" class="link" title="Start a new session">New</button>
   </header>
   <main id="log" aria-live="polite">
-    <div class="hint">Ask about the open repository, e.g. <em>Where is get_debug_flag defined and what does it do?</em>
-    The agent runs on TrueForge and explores the workspace with editor tools.</div>
+    <div class="hint">Ask about the open repository or ask for a change, e.g. <em>Where is get_debug_flag defined?</em>
+    The agent runs on TrueForge. Every edit is shown to you hunk by hunk before anything is written,
+    and every command needs your approval.</div>
   </main>
   <footer>
     <div id="status" class="muted"></div>

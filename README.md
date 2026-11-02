@@ -27,12 +27,34 @@ VS Code ── Forge Agent extension ──────────────�
 ```
 
 ## Status
-Milestone 1 (walking skeleton):
-- Agent panel with token streaming and Stop (cancels the turn in TrueForge).
-- Read-only editor tools: `list_files`, `read_file`, `search_code` (ripgrep, with a built-in fallback).
+- **Agent panel** with token streaming and **Stop**. Stop cancels the turn inside TrueForge, kills
+  running commands and closes open reviews; nothing unapproved is written.
+- **Editor tools (MCP):** `list_files`, `read_file`, `search_code` (ripgrep, with a built-in fallback).
+- **Edits with per-hunk review, driven by TrueForge tool approval.**
+  - `propose_write` is gated by TrueForge (`require_approval_for_tools`).
+  - When the agent calls it, TrueForge pauses the turn and the extension opens the proposal as a
+    diff, with ✓ Accept / ✗ Reject above each hunk (plus Accept all / Reject all / side-by-side).
+  - The decisions go back to TrueForge as approvals. Only the accepted hunks are written, as one
+    atomic edit, and the agent is told exactly which hunks were rejected.
+  - Undo with Cmd/Ctrl+Z in the file, or with **Forge Agent: Revert Last Agent Change** (also works
+    after saving).
+- **`run_command`** (e.g. tests), approved per command in the panel, with live output in the
+  "Forge Agent: Commands" channel.
 
-Next: inline edit, per-hunk diff review driven by TrueForge tool approvals, context retrieval with a
-budget, and model fallback.
+Next: inline edit (Cmd/Ctrl+I), context retrieval with a budget, model fallback.
+
+### How a reviewed edit flows
+```
+agent (in TrueForge) ──propose_write──▶ TrueForge pauses: tool.approval_required
+        ▲                                         │
+        │                                         ▼
+        │                    extension opens the review (hunk by hunk, nothing written)
+        │                                         │ user decides each hunk
+        │                                         ▼
+        └──── tool result: "applied 2 of 3 hunks; rejected …" ◀── user.tool_approval (allow / deny)
+                         ▲                                         │
+                         └── MCP propose_write writes ONLY the accepted hunks (one atomic WorkspaceEdit)
+```
 
 ## Starting point
 **From scratch.** No upstream editor project was forked.
@@ -69,8 +91,9 @@ Or add the provider in the TrueForge UI under Settings → Model providers.
 
 ### 3. Run the extension
 Open this folder in VS Code and press **F5** ("Run Forge Agent").
-- A new VS Code window opens with the extension loaded and `../repos/flask-3.1.3` as its workspace.
-  Edit `.vscode/launch.json` to open another repository.
+- A new VS Code window opens with the extension loaded and `../repos/flask-work` (a working clone
+  of pallets/flask at tag 3.1.3) as its workspace. Edit `.vscode/launch.json` to open another
+  repository.
 - Open the **Forge Agent** view in the activity bar and ask about the repository, e.g.
   *"Where is `get_debug_flag` defined and what does it do?"*
 - **Open in TrueForge** (panel header) shows the same session in TrueForge's UI: turns, tool calls,
@@ -103,6 +126,8 @@ The extension works with whatever model TrueForge is configured with.
 ```bash
 npm run watch       # rebuild on change
 npm run typecheck   # tsc --noEmit
+npm test            # unit tests (diff/hunk engine)
+npm run check       # typecheck + build + tests
 ```
 Logs: **Forge Agent: Show Log** (command palette).
 
