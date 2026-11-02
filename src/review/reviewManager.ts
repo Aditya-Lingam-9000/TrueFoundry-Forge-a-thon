@@ -21,7 +21,17 @@ interface Review {
   uri: vscode.Uri;
   /** line of each hunk's @@ header in the rendered document */
   headerLines: number[];
+  column: vscode.ViewColumn;
+  title: string;
   resolve: (accepted: boolean[] | null) => void;
+  onChange?: (states: HunkState[]) => void;
+}
+
+export interface ReviewOptions {
+  /** where the review opens (inline edits open beside the file being edited) */
+  column?: vscode.ViewColumn;
+  /** first header line, e.g. "Inline edit: make it faster" */
+  title?: string;
   onChange?: (states: HunkState[]) => void;
 }
 
@@ -60,7 +70,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
   }
 
   /** Open a review and wait for the decision. Resolves with per-hunk acceptance, or null if cancelled. */
-  start(callId: string, proposal: Proposal, hunks: Hunk[], onChange?: (states: HunkState[]) => void): Promise<boolean[] | null> {
+  start(callId: string, proposal: Proposal, hunks: Hunk[], options: ReviewOptions = {}): Promise<boolean[] | null> {
     return new Promise(resolve => {
       const uri = vscode.Uri.from({
         scheme: REVIEW_SCHEME,
@@ -73,8 +83,12 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
         states: hunks.map(() => 'pending'),
         uri,
         headerLines: [],
+        column: options.column ?? vscode.ViewColumn.One,
+        title:
+          options.title ??
+          `Forge Agent proposes ${proposal.exists ? 'a change to' : 'a NEW file'} ${proposal.rel}`,
         resolve,
-        onChange,
+        onChange: options.onChange,
       });
       this.open(callId).catch((err: unknown) => {
         void vscode.window.showErrorMessage(
@@ -98,7 +112,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
     if (doc.languageId !== 'diff') {
       await vscode.languages.setTextDocumentLanguage(doc, 'diff');
     }
-    await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.One });
+    await vscode.window.showTextDocument(doc, { preview: false, viewColumn: r.column });
   }
 
   /** Cancel every open review (e.g. the user pressed Stop): nothing gets applied. */
@@ -117,7 +131,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
     const added = r.hunks.reduce((n, h) => n + h.added, 0);
     const removed = r.hunks.reduce((n, h) => n + h.removed, 0);
     const out: string[] = [
-      `# Forge Agent proposes ${r.proposal.exists ? 'a change to' : 'a NEW file'} ${r.proposal.rel}`,
+      `# ${r.title.replace(/\s+/g, ' ').slice(0, 200)}`,
       `# ${r.hunks.length} hunk(s) · +${added} −${removed} · nothing is written until you decide every hunk`,
     ];
     if (r.proposal.description) {

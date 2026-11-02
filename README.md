@@ -40,8 +40,17 @@ VS Code ── Forge Agent extension ──────────────�
     after saving).
 - **`run_command`** (e.g. tests), approved per command in the panel, with live output in the
   "Forge Agent: Commands" channel.
+- **Inline edit (Cmd/Ctrl+I, or right-click → Forge Agent: Inline Edit…):** select code, type an
+  instruction, review the diff beside the file, accept or reject each hunk.
+  - Each inline edit is one fresh, lean TrueForge session ([`agent/inline-edit.json`](agent/inline-edit.json)).
+    It gets the selection plus 15 lines of context, and only `propose_write` (plus `read_file`/`search_code`
+    if really needed).
+  - The edit is anchored to the selected lines, so a repeated snippet elsewhere can't be hit. Any
+    change outside the selection is refused before the user sees it.
+  - Progress streams in a cancellable notification and in the agent panel. A failing model shows a
+    clear error, and nothing is written.
 
-Next: inline edit (Cmd/Ctrl+I), context retrieval with a budget, model fallback.
+Next: context retrieval with a budget, model fallback.
 
 ### How a reviewed edit flows
 ```
@@ -77,7 +86,7 @@ npm run compile
 ```bash
 bash scripts/start-trueforge.sh
 ```
-This runs `npx @truefoundry/trueforge@0.182.0` (pinned) on `http://localhost:8790` with
+This runs `npx @truefoundry/trueforge@0.182.0` (pinned) on `http://127.0.0.1:8790` with
 `OUTBOUND_URL_ALLOWED_HOSTS=["127.0.0.1","localhost"]`. TrueForge must be allowed to call the
 extension's MCP server on 127.0.0.1.
 
@@ -109,7 +118,7 @@ sends inline when it creates a session.
 ## Settings
 | Setting | Default | Meaning |
 |---|---|---|
-| `forgeAgent.trueforgeUrl` | `http://localhost:8790` | TrueForge base URL |
+| `forgeAgent.trueforgeUrl` | `http://127.0.0.1:8790` | TrueForge base URL |
 | `forgeAgent.model` | *(empty → spec)* | Model override, `<provider>/<model>` |
 | `forgeAgent.agentDefinition` | *(bundled spec)* | Path to another agent spec |
 | `forgeAgent.mcpServerName` | `forge-editor` | Name of the editor MCP server in TrueForge |

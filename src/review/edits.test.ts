@@ -4,7 +4,17 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { applyEdits, MAX_CONTENT_REWRITE_LINES, normalizeProposeArgs, parseProposeArgs, stripLineNumbers } from './edits';
+import {
+  applyEdits,
+  argsKey,
+  assertWithinSelection,
+  MAX_CONTENT_REWRITE_LINES,
+  normalizeProposeArgs,
+  parseProposeArgs,
+  replaceSelection,
+  sameCode,
+  stripLineNumbers,
+} from './edits';
 
 const FILE = [
   'def get_debug_flag() -> bool:',
@@ -86,6 +96,52 @@ test('stripLineNumbers only strips when every line is numbered', () => {
   assert.equal(stripLineNumbers('   1  a\nb'), '   1  a\nb');
 });
 
+test('argsKey: the raw model string and the MCP object identify the same call', () => {
+  const variants = [
+    { path: 'x.py', old_text: OLD, new_text: NEW, description: 'd' },
+    { path: 'x.py', edits: [{ old_text: OLD, new_text: NEW }] },
+    { path: 'x.py', edits: JSON.stringify([{ old_text: OLD, new_text: NEW }]) },
+  ];
+  for (const v of variants) {
+    // MCP schema validation may drop unknown keys; normalisation ignores them too
+    const viaMcp = normalizeProposeArgs({ ...v, unknown_extra: 1 });
+    const viaReview = parseProposeArgs(JSON.stringify(v));
+    assert.equal(argsKey(viaMcp), argsKey(viaReview));
+  }
+  assert.notEqual(
+    argsKey(normalizeProposeArgs({ path: 'x.py', old_text: OLD, new_text: NEW })),
+    argsKey(normalizeProposeArgs({ path: 'x.py', old_text: OLD, new_text: OLD })),
+  );
+});
+
 test('rewrite limit is a sane size', () => {
   assert.ok(MAX_CONTENT_REWRITE_LINES >= 50 && MAX_CONTENT_REWRITE_LINES <= 500);
+});
+
+test('inline: replaceSelection replaces exactly the selected lines', () => {
+  const scope = { rel: 'helpers.py', startLine: 4, endLine: 4, text: OLD };
+  const out = replaceSelection(FILE, scope, NEW + '\n');
+  assert.equal(out, FILE.replace(OLD, NEW));
+  // a selection that no longer matches the file is refused
+  assert.equal(replaceSelection(FILE, { ...scope, startLine: 3, endLine: 3 }, NEW), undefined);
+});
+
+test('inline: repeated snippet is anchored to the selected line, not the first match', () => {
+  const twice = 'x = 1\nreturn x\nx = 2\nreturn x\n';
+  const out = replaceSelection(twice, { rel: 'f', startLine: 4, endLine: 4, text: 'return x' }, 'return x + 1');
+  assert.equal(out, 'x = 1\nreturn x\nx = 2\nreturn x + 1\n');
+});
+
+test('inline: changes outside the selection are refused', () => {
+  const scope = { rel: 'helpers.py', startLine: 4, endLine: 4, text: OLD };
+  assert.doesNotThrow(() => assertWithinSelection(FILE, FILE.replace(OLD, NEW), scope));
+  const touchesNeighbour = FILE.replace(OLD, NEW).replace('return val.lower() in ("0", "false", "no")', 'return False');
+  assert.throws(() => assertWithinSelection(FILE, touchesNeighbour, scope), /only lines 4-4/);
+  // growing or shrinking the selection itself is fine
+  assert.doesNotThrow(() => assertWithinSelection(FILE, FILE.replace(OLD, `${NEW}\n    # extra line`), scope));
+});
+
+test('sameCode ignores trailing whitespace and outer blank lines', () => {
+  assert.ok(sameCode('a  \nb\n\n', '\na\nb'));
+  assert.ok(!sameCode('a\nb', 'a\nc'));
 });

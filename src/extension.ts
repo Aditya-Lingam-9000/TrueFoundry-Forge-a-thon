@@ -7,7 +7,8 @@
  * user's approval before any write or command.
  */
 import * as vscode from 'vscode';
-import { AgentSession, trueforgeUrl } from './agent/agentSession';
+import { AgentSession, trueforgeUrl, type PanelMessage } from './agent/agentSession';
+import { registerInlineEdit } from './inline/inlineEdit';
 import { CommandRunner } from './mcp/commandRunner';
 import { startEditorMcpServer, type EditorMcpEndpoint } from './mcp/editorServer';
 import { ChangeController } from './review/changeController';
@@ -25,14 +26,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const client = new TrueForgeClient(trueforgeUrl);
   let session: AgentSession | undefined;
+  let inlineSession: AgentSession | undefined;
   let ready = false; // the panel may resolve before activation finishes; announce() waits for this
 
   const panel = new AgentPanelProvider(context.extensionUri, {
     send: text => void session?.send(text),
-    stop: () => void session?.stop(),
+    stop: () => {
+      void session?.stop();
+      void inlineSession?.stop();
+    },
     newSession: () => void session?.reset(),
     openSession: () => openSessionInTrueForge(),
-    approve: (callId, allow) => session?.answerApproval(callId, allow),
+    approve: (callId, allow) => {
+      session?.answerApproval(callId, allow);
+      inlineSession?.answerApproval(callId, allow);
+    },
     openReview: callId => void reviews.open(callId),
     revert: changeId => void revert(changeId),
     ready: () => {
@@ -77,17 +85,45 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
   const endpoint = mcpEndpoint;
+  const shared = { client, mcp: endpoint, reviews, changes, commands, extensionPath: context.extensionPath, log };
+  // "Open in TrueForge" opens whichever session (chat or inline edit) ran last.
+  let lastSessionUrl: string | null = null;
+  const remember = (msg: PanelMessage): void => {
+    if (msg.type === 'session') {
+      lastSessionUrl = msg.url ?? lastSessionUrl;
+    }
+  };
   session = new AgentSession({
-    client,
-    mcp: endpoint,
-    reviews,
-    changes,
-    commands,
-    extensionPath: context.extensionPath,
-    post: msg => panel.post(msg),
+    ...shared,
+    post: msg => {
+      remember(msg);
+      panel.post(msg);
+    },
+    isOtherBusy: () => inlineSession?.isBusy ?? false,
+  });
+  // Inline edits: a fresh lean session per edit, reviews open beside the edited file.
+  let inlineSink: ((msg: PanelMessage) => void) | undefined;
+  inlineSession = new AgentSession({
+    ...shared,
+    post: msg => {
+      remember(msg);
+      panel.post(msg);
+      inlineSink?.(msg);
+    },
+    spec: { setting: 'inlineAgentDefinition', bundled: 'inline-edit.json' },
+    oneShot: true,
+    reviewColumn: vscode.ViewColumn.Beside,
+    isOtherBusy: () => session?.isBusy ?? false,
+  });
+  registerInlineEdit(context, {
+    session: inlineSession,
     log,
+    setProgressSink: sink => {
+      inlineSink = sink;
+    },
   });
   const agent = session;
+  const inlineAgent = inlineSession;
   ready = true;
 
   /** Health check + MCP registration, reported in the panel. Safe to call any time. */
@@ -119,7 +155,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   function openSessionInTrueForge(): void {
-    const url = agent.sessionUrl();
+    const url = lastSessionUrl ?? agent.sessionUrl();
     if (url) {
       void vscode.env.openExternal(vscode.Uri.parse(url));
     } else {
@@ -129,7 +165,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.commands.registerCommand('forgeAgent.newSession', () => agent.reset()),
-    vscode.commands.registerCommand('forgeAgent.stop', () => agent.stop()),
+    vscode.commands.registerCommand('forgeAgent.stop', () => Promise.all([agent.stop(), inlineAgent.stop()])),
     vscode.commands.registerCommand('forgeAgent.openSessionInTrueForge', openSessionInTrueForge),
     vscode.commands.registerCommand('forgeAgent.revertLastChange', () => revert()),
     vscode.commands.registerCommand('forgeAgent.reconnect', () => announce()),

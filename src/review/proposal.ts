@@ -7,7 +7,15 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { resolveInWorkspace } from '../mcp/workspace';
-import { applyEdits, MAX_CONTENT_REWRITE_LINES, ProposalError, type ProposeWriteArgs } from './edits';
+import {
+  applyEdits,
+  MAX_CONTENT_REWRITE_LINES,
+  ProposalError,
+  replaceSelection,
+  sameCode,
+  type ProposeWriteArgs,
+  type SelectionScope,
+} from './edits';
 
 export {
   MAX_CONTENT_REWRITE_LINES,
@@ -16,6 +24,7 @@ export {
   ProposalError,
   type EditSpec,
   type ProposeWriteArgs,
+  type SelectionScope,
 } from './edits';
 
 export interface Proposal {
@@ -102,4 +111,54 @@ export async function buildProposal(args: ProposeWriteArgs): Promise<Proposal> {
     throw new ProposalError(`The proposed change to ${rel} does not change anything.`);
   }
   return { rel, abs, exists, eol, rawOriginal, original, proposed, description };
+}
+
+/**
+ * Inline edits: when the model's single edit replaces the user's selection, anchor it to the
+ * selected LINES (not to the first textual match, which may be elsewhere in the file). Returns
+ * undefined when the call is not a plain "replace the selection" edit; the caller then falls back
+ * to buildProposal and the selection guard.
+ */
+export async function buildSelectionProposal(args: ProposeWriteArgs, scope: SelectionScope): Promise<Proposal | undefined> {
+  const edit = args.edits?.length === 1 ? args.edits[0] : undefined;
+  if (!edit || !sameCode(edit.old_text, scope.text)) {
+    return undefined;
+  }
+  let resolved: { abs: string; rel: string };
+  try {
+    resolved = resolveInWorkspace(args.path);
+  } catch {
+    return undefined;
+  }
+  if (resolved.rel !== scope.rel) {
+    return undefined;
+  }
+  const open = vscode.workspace.textDocuments.find(d => d.uri.fsPath === resolved.abs);
+  let rawOriginal: string;
+  try {
+    rawOriginal = open ? open.getText() : await fs.promises.readFile(resolved.abs, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const eol: '\n' | '\r\n' = rawOriginal.includes('\r\n') ? '\r\n' : '\n';
+  const original = rawOriginal.replace(/\r\n/g, '\n');
+  const proposed = replaceSelection(original, scope, edit.new_text);
+  if (proposed === undefined) {
+    throw new ProposalError(
+      `The selected lines ${scope.startLine}-${scope.endLine} of ${scope.rel} changed since the edit started; nothing was written.`,
+    );
+  }
+  if (proposed === original) {
+    throw new ProposalError(`The proposed change to ${scope.rel} does not change anything.`);
+  }
+  return {
+    rel: resolved.rel,
+    abs: resolved.abs,
+    exists: true,
+    eol,
+    rawOriginal,
+    original,
+    proposed,
+    description: (args.description ?? '').trim(),
+  };
 }

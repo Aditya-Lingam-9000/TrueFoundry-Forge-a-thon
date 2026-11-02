@@ -4,9 +4,11 @@
  * proposal. Each applied change is one atomic WorkspaceEdit (so Cmd+Z undoes it) and is recorded
  * so "Revert last agent change" can restore the previous text even after saving.
  */
+import * as fs from 'node:fs';
 import * as vscode from 'vscode';
-import { applyHunks, computeHunks, type Hunk } from './diff';
-import { buildProposal, normalizeProposeArgs, proposalKey, type Proposal } from './proposal';
+import { applyHunks, type Hunk } from './diff';
+import { argsKey } from './edits';
+import { normalizeProposeArgs, type Proposal, type ProposeWriteArgs } from './proposal';
 
 export interface AppliedChange {
   id: string;
@@ -22,6 +24,7 @@ export interface AppliedChange {
 }
 
 interface ApprovedProposal {
+  proposal: Proposal;
   hunks: Hunk[];
   accepted: boolean[];
 }
@@ -40,9 +43,12 @@ export class ChangeController {
     private readonly log: (msg: string) => void,
   ) {}
 
-  /** Remember the user's decision for this proposal (called before TrueForge is told "allow"). */
-  recordApproval(proposal: Proposal, hunks: Hunk[], accepted: boolean[]): void {
-    this.approved.set(proposalKey(proposal), { hunks, accepted });
+  /**
+   * Remember the user's decision for one propose_write call (called before TrueForge is told
+   * "allow"). The exact reviewed proposal is stored, so the write applies precisely what was shown.
+   */
+  recordApproval(args: ProposeWriteArgs, proposal: Proposal, hunks: Hunk[], accepted: boolean[]): void {
+    this.approved.set(argsKey(args), { proposal, hunks, accepted });
   }
 
   forgetApprovals(): void {
@@ -51,22 +57,21 @@ export class ChangeController {
 
   /** Executed by the propose_write MCP tool after TrueForge approval. Returns the tool result text. */
   async applyApproved(rawArgs: unknown): Promise<string> {
-    const proposal = await buildProposal(normalizeProposeArgs(rawArgs));
-    const key = proposalKey(proposal);
+    const args = normalizeProposeArgs(rawArgs);
+    const key = argsKey(args);
     const decision = this.approved.get(key);
     if (!decision) {
       throw new Error(
-        `This change to ${proposal.rel} was not reviewed in the editor, so it was not applied. ` +
-          'Every write must go through the user\'s review.',
+        `This change to ${args.path} was not reviewed in the editor, so it was not applied. ` +
+          "Every write must go through the user's review.",
       );
     }
     this.approved.delete(key);
+    const { proposal, hunks } = decision;
 
-    // The file must not have changed since the review: recompute and compare the hunks.
-    const hunks = computeHunks(proposal.original, proposal.proposed);
-    const same =
-      hunks.length === decision.hunks.length && hunks.every((h, i) => h.header === decision.hunks[i].header);
-    if (!same) {
+    // The file must be exactly as it was when the user reviewed the change.
+    const now = await currentText(proposal.abs);
+    if (now !== (proposal.exists ? proposal.rawOriginal : null)) {
       throw new Error(`${proposal.rel} changed while the review was open; nothing was applied. Propose the change again.`);
     }
 
@@ -117,6 +122,11 @@ export class ChangeController {
     return result;
   }
 
+  /** True while a reviewed proposal is waiting for TrueForge to execute it. */
+  hasPendingApprovals(): boolean {
+    return this.approved.size > 0;
+  }
+
   latest(): AppliedChange | undefined {
     return this.history[this.history.length - 1];
   }
@@ -163,5 +173,18 @@ export class ChangeController {
     this.log(`reverted ${change.id}: ${change.rel}`);
     this.onEvent({ type: 'reverted', change });
     return `Reverted the agent's change to ${change.rel}.`;
+  }
+}
+
+/** The file's current text: the open editor's buffer if any, else disk; null if it does not exist. */
+async function currentText(abs: string): Promise<string | null> {
+  const open = vscode.workspace.textDocuments.find(d => d.uri.fsPath === abs);
+  if (open) {
+    return open.getText();
+  }
+  try {
+    return await fs.promises.readFile(abs, 'utf8');
+  } catch {
+    return null;
   }
 }

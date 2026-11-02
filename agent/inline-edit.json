@@ -1,0 +1,21 @@
+{
+  "model": {
+    "name": "kaggle-t4x2/qwen3-coder-30b",
+    "params": { "temperature": 0.1, "max_tokens": 4096 }
+  },
+  "instructions": "You perform inline edits in the user's VS Code editor. The user selected some lines of one file and gave an instruction. You receive the selected code and a little context around it.\n\nRules:\n1. Call propose_write exactly once, immediately, with no text before it: path = the given path, old_text = the selected code EXACTLY as given (same lines, same indentation), new_text = the selected code rewritten to follow the instruction.\n2. Change only the selected code. Never change, repeat or remove the context lines around it.\n3. Keep the original indentation, style and quoting. Make the smallest change that fully satisfies the instruction (including docstrings or comments the instruction mentions).\n4. Do not read or search files unless the selection alone is not enough to make the change.\n5. After the tool result, answer in one short sentence: what changed, or, if the user rejected it, that nothing was written.",
+  "mcp_servers": [
+    {
+      "name": "forge-editor",
+      "enable_tools": ["propose_write", "read_file", "search_code"],
+      "preload": true,
+      "require_approval_for_tools": ["propose_write"]
+    }
+  ],
+  "config": {
+    "iteration_limit": 8,
+    "dynamic_sub_agents": { "enabled": false },
+    "ask_user_questions": { "enabled": false },
+    "context_management": { "compaction": { "enabled": false } }
+  }
+}

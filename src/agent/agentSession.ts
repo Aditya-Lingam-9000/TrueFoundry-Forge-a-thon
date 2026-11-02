@@ -18,7 +18,15 @@ import type { EditorMcpEndpoint } from '../mcp/editorServer';
 import type { CommandRunner } from '../mcp/commandRunner';
 import type { ChangeController } from '../review/changeController';
 import { computeHunks } from '../review/diff';
-import { buildProposal, parseProposeArgs, type Proposal } from '../review/proposal';
+import { assertWithinSelection } from '../review/edits';
+import {
+  buildProposal,
+  buildSelectionProposal,
+  parseProposeArgs,
+  type Proposal,
+  type ProposeWriteArgs,
+  type SelectionScope,
+} from '../review/proposal';
 import type { ReviewManager } from '../review/reviewManager';
 import { errorMessage, TrueForgeClient, type ToolCallDelta, type TurnEvent, type TurnInput } from '../trueforge/client';
 
@@ -79,6 +87,29 @@ export interface AgentSessionDeps {
   extensionPath: string;
   post: (msg: PanelMessage) => void;
   log: (msg: string) => void;
+  /** agent definition to use: a path, or a setting name holding a path, with a bundled default */
+  spec?: { setting: string; bundled: string };
+  /** start a fresh TrueForge session for every message (inline edits) */
+  oneShot?: boolean;
+  /** where reviews open (inline edits open beside the edited file) */
+  reviewColumn?: vscode.ViewColumn;
+  /** another agent session that must not run at the same time */
+  isOtherBusy?: () => boolean;
+}
+
+/** How a send() ended. */
+export interface TurnOutcome {
+  status: 'done' | 'error' | 'stopped' | 'busy';
+  message?: string;
+}
+
+export interface SendOptions {
+  /** text shown in the panel instead of the full prompt */
+  display?: string;
+  /** inline edit: only these lines of this file may change */
+  scope?: SelectionScope;
+  /** title of the review document */
+  reviewTitle?: string;
 }
 
 export class AgentSession {
@@ -89,6 +120,10 @@ export class AgentSession {
   private callsById = new Map<string, ToolCallState>();
   /** pending Allow/Deny questions in the panel */
   private readonly panelApprovals = new Map<string, (allow: boolean | null) => void>();
+  /** options of the message being processed */
+  private sendOptions: SendOptions = {};
+  /** how the current send ended (set from turn.done) */
+  private outcome: TurnOutcome = { status: 'done' };
 
   constructor(private readonly d: AgentSessionDeps) {}
 
@@ -156,8 +191,9 @@ export class AgentSession {
   }
 
   loadSpec(): AgentSpec {
-    const configured = vscode.workspace.getConfiguration('forgeAgent').get<string>('agentDefinition', '').trim();
-    const file = configured || path.join(this.d.extensionPath, 'agent', 'forge-agent.json');
+    const spec0 = this.d.spec ?? { setting: 'agentDefinition', bundled: 'forge-agent.json' };
+    const configured = vscode.workspace.getConfiguration('forgeAgent').get<string>(spec0.setting, '').trim();
+    const file = configured || path.join(this.d.extensionPath, 'agent', spec0.bundled);
     const spec = JSON.parse(fs.readFileSync(file, 'utf8')) as AgentSpec;
     const model = vscode.workspace.getConfiguration('forgeAgent').get<string>('model', '').trim();
     if (model) {
@@ -177,18 +213,23 @@ export class AgentSession {
     return spec;
   }
 
-  async send(text: string): Promise<void> {
-    if (this.busy) {
+  async send(text: string, options: SendOptions = {}): Promise<TurnOutcome> {
+    if (this.busy || this.d.isOtherBusy?.()) {
       this.d.post({ type: 'status', kind: 'info', text: 'The agent is still working — press Stop first.' });
-      return;
+      return { status: 'busy', message: 'The agent is still working — press Stop first.' };
     }
     this.busy = true;
+    this.sendOptions = options;
+    this.outcome = { status: 'done' };
     this.d.post({ type: 'busy', busy: true });
-    this.d.post({ type: 'user', text });
+    this.d.post({ type: 'user', text: options.display ?? text });
     const controller = new AbortController();
     this.controller = controller;
     this.callsById = new Map();
     const started = Date.now();
+    if (this.d.oneShot) {
+      this.sessionId = null;
+    }
     try {
       await this.registerMcpServer();
       if (!this.sessionId) {
@@ -221,20 +262,25 @@ export class AgentSession {
         input = decisions;
       }
       if (controller.signal.aborted) {
+        this.outcome = { status: 'stopped' };
         this.d.post({ type: 'status', kind: 'info', text: 'Stopped. Nothing unapproved was written.' });
       }
     } catch (err) {
       if (controller.signal.aborted) {
+        this.outcome = { status: 'stopped' };
         this.d.post({ type: 'status', kind: 'info', text: 'Stopped.' });
       } else {
+        this.outcome = { status: 'error', message: errorMessage(err) };
         this.d.log(`turn failed: ${errorMessage(err)}`);
         this.d.post({ type: 'status', kind: 'error', text: errorMessage(err) });
       }
     } finally {
       this.busy = false;
       this.controller = null;
+      this.sendOptions = {};
       this.d.post({ type: 'busy', busy: false });
     }
+    return this.outcome;
   }
 
   /** Decide one pending approval → the user.tool_approval item for TrueForge. */
@@ -259,8 +305,20 @@ export class AgentSession {
 
     if (call.name === 'propose_write') {
       let proposal: Proposal;
+      let args: ProposeWriteArgs;
+      const scope = this.sendOptions.scope;
       try {
-        proposal = await buildProposal(parseProposeArgs(call.args));
+        args = parseProposeArgs(call.args);
+        if (scope) {
+          // Inline edit: anchor to the selected lines, and never let it touch anything else.
+          proposal = (await buildSelectionProposal(args, scope)) ?? (await buildProposal(args));
+          if (proposal.rel !== scope.rel) {
+            throw new Error(`This is an inline edit of ${scope.rel}; do not change other files.`);
+          }
+          assertWithinSelection(proposal.original, proposal.proposed, scope);
+        } else {
+          proposal = await buildProposal(args);
+        }
       } catch (err) {
         const reason = errorMessage(err);
         this.d.log(`propose_write sent back: ${reason}\n  arguments: ${call.args.slice(0, 3000)}`);
@@ -286,7 +344,10 @@ export class AgentSession {
         removed: hunks.reduce((n, h) => n + h.removed, 0),
       };
       this.d.post({ ...summary, state: 'pending', detail: proposal.description || undefined });
-      const accepted = await this.d.reviews.start(ref.callId, proposal, hunks);
+      const accepted = await this.d.reviews.start(ref.callId, proposal, hunks, {
+        column: this.d.reviewColumn,
+        title: this.sendOptions.reviewTitle,
+      });
       if (accepted === null) {
         this.d.post({ ...summary, state: 'cancelled' });
         return deny('The user stopped the run before reviewing this change. Nothing was written.');
@@ -299,7 +360,7 @@ export class AgentSession {
             'Do not propose the same change again: briefly say what you wanted to change and ask the user how to proceed.',
         );
       }
-      this.d.changes.recordApproval(proposal, hunks, accepted);
+      this.d.changes.recordApproval(args, proposal, hunks, accepted);
       this.d.post({ ...summary, state: n === hunks.length ? 'accepted' : 'partial', detail: `${n}/${hunks.length} hunks accepted` });
       return allow();
     }
@@ -496,11 +557,15 @@ export class AgentSession {
           const state = (ev.state ?? {}) as { status?: string; message?: string; reason?: string };
           const secs = ((Date.now() - started) / 1000).toFixed(1);
           if (state.status === 'done' && approvals.length === 0) {
+            this.outcome = { status: 'done' };
             this.d.post({ type: 'status', kind: 'ok', text: `Done in ${secs} s.` });
           } else if (state.status === 'cancelled') {
+            this.outcome = { status: 'stopped', message: state.reason };
             this.d.post({ type: 'status', kind: 'info', text: `Cancelled (${state.reason ?? 'cancelled'}).` });
           } else if (state.status === 'error') {
-            this.d.post({ type: 'status', kind: 'error', text: `The model call failed: ${state.message ?? 'unknown error'}` });
+            const message = `The model call failed: ${state.message ?? 'unknown error'}`;
+            this.outcome = { status: 'error', message };
+            this.d.post({ type: 'status', kind: 'error', text: message });
           }
           break;
         }
@@ -575,7 +640,7 @@ function describeCommand(args: string): string {
 export function trueforgeUrl(): string {
   return vscode.workspace
     .getConfiguration('forgeAgent')
-    .get<string>('trueforgeUrl', 'http://localhost:8790')
+    .get<string>('trueforgeUrl', 'http://127.0.0.1:8790')
     .replace(/\/+$/, '');
 }
 

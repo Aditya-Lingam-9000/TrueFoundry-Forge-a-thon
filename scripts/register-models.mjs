@@ -4,12 +4,12 @@
 //
 //   cp config/models.example.json config/models.json   # then edit base URLs, delete unused providers
 //   export FORGE_API_KEY=...                           # keys referenced in the file
-//   node scripts/register-models.mjs [config/models.json] [--trueforge http://localhost:8790]
+//   node scripts/register-models.mjs [config/models.json] [--trueforge http://127.0.0.1:8790]
 import { readFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 const tfIndex = args.indexOf('--trueforge');
-const trueforge = (tfIndex !== -1 ? args.splice(tfIndex, 2)[1] : 'http://localhost:8790').replace(/\/+$/, '');
+const trueforge = (tfIndex !== -1 ? args.splice(tfIndex, 2)[1] : 'http://127.0.0.1:8790').replace(/\/+$/, '');
 const file = args[0] ?? 'config/models.json';
 
 let config;

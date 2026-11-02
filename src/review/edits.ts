@@ -2,6 +2,16 @@
  * propose_write argument handling and exact-text edits. Pure (no VS Code), so it is unit-tested
  * and shared by the review (before approval) and the write (after approval).
  */
+import { createHash } from 'node:crypto';
+
+/**
+ * Identity of one propose_write call: the hash of its normalised arguments. The review computes it
+ * from the model's raw argument string, the MCP tool from the arguments TrueForge passes on; both
+ * normalise to the same object, so the approved proposal is found again at write time.
+ */
+export function argsKey(args: ProposeWriteArgs): string {
+  return createHash('sha256').update(JSON.stringify(args)).digest('hex');
+}
 
 export interface EditSpec {
   old_text: string;
@@ -212,4 +222,59 @@ function trimOuterBlankLines(lines: string[]): string[] {
 
 function leadingWhitespace(s: string): string {
   return /^\s*/.exec(s)?.[0] ?? '';
+}
+
+/** Same code, ignoring line endings, trailing whitespace and blank lines around it. */
+export function sameCode(a: string, b: string): boolean {
+  const norm = (s: string): string =>
+    trimOuterBlankLines(s.replace(/\r\n/g, '\n').split('\n').map(l => l.replace(/\s+$/, ''))).join('\n');
+  return norm(a) === norm(b);
+}
+
+/** A user's selection: whole lines [startLine, endLine], 1-based inclusive, and their text. */
+export interface SelectionScope {
+  rel: string;
+  startLine: number;
+  endLine: number;
+  text: string;
+}
+
+/**
+ * Replace the selected lines of `original` (normalised \n text) with `newText`. Returns undefined
+ * when the selected lines no longer hold the selected text.
+ */
+export function replaceSelection(original: string, scope: SelectionScope, newText: string): string | undefined {
+  const lines = original.split('\n');
+  const start = scope.startLine - 1;
+  const end = scope.endLine; // exclusive
+  if (start < 0 || end > lines.length || start >= end) {
+    return undefined;
+  }
+  if (!sameCode(lines.slice(start, end).join('\n'), scope.text)) {
+    return undefined;
+  }
+  let replacement = stripLineNumbers(newText.replace(/\r\n/g, '\n'));
+  if (replacement.endsWith('\n')) {
+    replacement = replacement.slice(0, -1);
+  }
+  const middle = replacement === '' ? [] : replacement.split('\n');
+  return [...lines.slice(0, start), ...middle, ...lines.slice(end)].join('\n');
+}
+
+/** Throws unless `proposed` differs from `original` only inside the selected lines. */
+export function assertWithinSelection(original: string, proposed: string, scope: SelectionScope): void {
+  const o = original.split('\n');
+  const p = proposed.split('\n');
+  const before = scope.startLine - 1;
+  const after = o.length - scope.endLine;
+  const ok =
+    p.length >= before + after &&
+    o.slice(0, before).every((line, i) => line === p[i]) &&
+    o.slice(o.length - after).every((line, i) => line === p[p.length - after + i]);
+  if (!ok) {
+    throw new ProposalError(
+      `This is an inline edit of the user's selection: only lines ${scope.startLine}-${scope.endLine} of ${scope.rel} may ` +
+        'change. Keep everything outside the selection exactly as it is.',
+    );
+  }
 }

@@ -42,6 +42,10 @@
     },
     "commands": [
       {
+        "command": "forgeAgent.inlineEdit",
+        "title": "Forge Agent: Inline Edit…"
+      },
+      {
         "command": "forgeAgent.newSession",
         "title": "Forge Agent: New Session"
       },
@@ -66,12 +70,29 @@
         "title": "Forge Agent: Show Log"
       }
     ],
+    "keybindings": [
+      {
+        "command": "forgeAgent.inlineEdit",
+        "key": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "editorTextFocus && !editorReadonly"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "forgeAgent.inlineEdit",
+          "when": "editorTextFocus && !editorReadonly",
+          "group": "navigation@1"
+        }
+      ]
+    },
     "configuration": {
       "title": "Forge Agent",
       "properties": {
         "forgeAgent.trueforgeUrl": {
           "type": "string",
-          "default": "http://localhost:8790",
+          "default": "http://127.0.0.1:8790",
           "description": "Base URL of the local TrueForge server (npx @truefoundry/trueforge)."
         },
         "forgeAgent.model": {
@@ -83,6 +104,11 @@
           "type": "string",
           "default": "",
           "description": "Path to an agent definition JSON. Empty = the bundled agent/forge-agent.json."
+        },
+        "forgeAgent.inlineAgentDefinition": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the agent definition JSON used for inline edits. Empty = the bundled agent/inline-edit.json."
         },
         "forgeAgent.mcpServerName": {
           "type": "string",
