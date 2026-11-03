@@ -16,7 +16,8 @@ test('a multi-file creation request gets the scout as its first step, with the r
   assert.ok(note);
   assert.match(note, /create_sub_agent with name "scout"/);
   assert.ok(note.includes(`TASK: ${TASK_B}`), 'the scout sees the exact request');
-  assert.match(scoutInput(TASK_B), /retrieve_context with the task and budget_tokens 4500/);
+  assert.match(scoutInput(TASK_B), /retrieve_context with query = the TASK text above copied exactly/);
+  assert.match(scoutInput(TASK_B), /budget_tokens 4500/);
   assert.match(scoutInput(TASK_B), /at most 8 tool calls/);
 });
 

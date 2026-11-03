@@ -14,8 +14,9 @@ const MULTI_FILE = /\b(tests?|tested|document|documented|documentation|docs|chan
 export function scoutInput(request: string): string {
   return (
     `TASK: ${request.trim()}\n\n` +
-    'Your first action must be a call to retrieve_context with the task and budget_tokens 4500: it returns the ' +
-    'existing similar features (the pattern), where they are registered, their tests and their docs. Then confirm ' +
+    'Your first action must be a call to retrieve_context with query = the TASK text above copied exactly (do not ' +
+    'rephrase it) and budget_tokens 4500: it returns the existing similar features (the pattern), where they are ' +
+    'registered, their tests and their docs. Then confirm ' +
     'the exact line ranges with file_outline or read_file with start_line/end_line (never whole files). Use at most ' +
     '8 tool calls. Find every place that must change: implementation, where similar existing features are ' +
     'registered or wired up, an existing test of a similar feature to copy, the documentation section of a ' +
