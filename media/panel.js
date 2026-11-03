@@ -91,6 +91,7 @@
     meter.appendChild(fill);
     card.appendChild(meter);
     card.appendChild(el('div', 'card-detail', 'for: ' + m.query + '  ·  ranked ' + m.considered + ' candidate files'));
+    for (const p of m.patterns || []) card.appendChild(el('div', 'card-detail plan-pattern', '🧩 Pattern: ' + p));
     const list = el('ol', 'plan-list');
     for (const it of m.items) {
       const li = el('li');

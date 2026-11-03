@@ -5,14 +5,19 @@
  *   candidates = files with term hits (ripgrep), weighted by how rare each term is across files
  *              + files whose path contains a term
  *              + test/doc companions of the best implementation files (tests/test_<name>.py, docs/<name>.rst, …)
+ *              + sibling pattern: if the candidates contain a family of existing definitions of the requested
+ *                kind (run_command, shell_command, … for "command"), the files that name those members
+ *                (their tests and docs) and the companions of the family's file
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { EXCLUDE_GLOB, searchWorkspace, toRel, workspaceRoot } from '../mcp/workspace';
-import { buildPlan, extractTerms, tokenize, type ContextPlan, type SourceFile } from './rank';
+import { buildPlan, extractTerms, findFamilies, tokenize, type ContextPlan, type SourceFile } from './rank';
 
 const MAX_CANDIDATES = 18;
+/** files added because they name the members of a sibling family */
+const MAX_SIBLING_FILES = 6;
 const MAX_FILE_BYTES = 400_000;
 const TEXT_EXT =
   /\.(py|pyi|js|jsx|ts|tsx|mjs|cjs|json|toml|cfg|ini|ya?ml|md|rst|txt|html|css|scss|go|rs|java|kt|rb|php|c|h|cc|cpp|hpp|cs|swift|sh|sql)$/i;
@@ -59,30 +64,59 @@ export async function retrieveContext(query: string, budget: number): Promise<Co
 
   // 3. companions of the best implementation files: their tests and docs
   const companionOf = new Map<string, string>();
-  const allSet = new Set(all);
   for (const file of candidates.filter(f => !isTestOrDoc(f)).slice(0, 5)) {
-    const base = path.basename(file).replace(/\.[^.]+$/, '');
-    if (base.length < 3 || base === '__init__') {
-      continue;
+    addCompanions(file, all, candidates, companionOf);
+  }
+
+  // 4. read
+  const files = await readFiles(candidates, companionOf);
+
+  // 5. sibling pattern: existing members of the requested kind, and the files that name them
+  const families = findFamilies(files, terms, query);
+  const family = families[0];
+  if (family) {
+    const extra: string[] = [];
+    addCompanions(family.file, all, extra, companionOf);
+    const pattern = family.members.map(m => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const { hits } = await searchWorkspace({ query: `\\b(${pattern})\\b`, isRegex: true, caseSensitive: true, maxResults: 200 });
+    const counts = new Map<string, number>();
+    for (const h of hits) {
+      if (TEXT_EXT.test(h.file) && h.file !== family.file) {
+        counts.set(h.file, (counts.get(h.file) ?? 0) + 1);
+      }
     }
-    for (const other of all) {
-      const ob = path.basename(other).toLowerCase();
-      const isCompanion =
-        ob === `test_${base}.py` ||
-        ob === `${base}_test.py` ||
-        ob.startsWith(`${base}.test.`) ||
-        ob.startsWith(`${base}.spec.`) ||
-        (/(^|\/)docs?\//.test(other) && (ob === `${base}.rst` || ob === `${base}.md`));
-      if (isCompanion && other !== file && allSet.has(other) && !companionOf.has(other)) {
-        companionOf.set(other, file);
-        if (!candidates.includes(other)) {
-          candidates.push(other);
-        }
+    extra.push(...[...counts.entries()].sort((a, b) => b[1] - a[1]).map(([f]) => f).slice(0, MAX_SIBLING_FILES));
+    const have = new Set(files.map(f => f.path));
+    files.push(...(await readFiles([...new Set(extra)].filter(f => !have.has(f)), companionOf)));
+  }
+  return buildPlan(query, terms, files, { budget, families });
+}
+
+/** Test and doc companions of an implementation file (tests/test_<base>.py, docs/<base>.rst, …). */
+function addCompanions(file: string, all: string[], into: string[], companionOf: Map<string, string>): void {
+  const base = path.basename(file).replace(/\.[^.]+$/, '');
+  if (base.length < 3 || base === '__init__') {
+    return;
+  }
+  for (const other of all) {
+    const ob = path.basename(other).toLowerCase();
+    const isCompanion =
+      ob === `test_${base}.py` ||
+      ob === `${base}_test.py` ||
+      ob.startsWith(`${base}.test.`) ||
+      ob.startsWith(`${base}.spec.`) ||
+      (/(^|\/)docs?\//.test(other) && (ob === `${base}.rst` || ob === `${base}.md`));
+    if (isCompanion && other !== file && !companionOf.has(other)) {
+      companionOf.set(other, file);
+      if (!into.includes(other)) {
+        into.push(other);
       }
     }
   }
+}
 
-  // 4. read and rank
+/** Read candidate files (open editors first, so unsaved text counts); skip large or binary files. */
+async function readFiles(candidates: string[], companionOf: Map<string, string>): Promise<SourceFile[]> {
   const root = workspaceRoot();
   const openDocs = new Map(vscode.workspace.textDocuments.map(d => [d.uri.fsPath, d]));
   const files: SourceFile[] = [];
@@ -108,7 +142,7 @@ export async function retrieveContext(query: string, budget: number): Promise<Co
       // unreadable: skip
     }
   }
-  return buildPlan(query, terms, files, { budget });
+  return files;
 }
 
 function isTestOrDoc(file: string): boolean {

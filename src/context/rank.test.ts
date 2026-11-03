@@ -9,6 +9,7 @@ import {
   definitions,
   estimateTokens,
   extractTerms,
+  findFamilies,
   MAX_BUDGET_TOKENS,
   MAX_RENDER_CHARS,
   renderPlan,
@@ -189,4 +190,61 @@ test('no matches → a helpful empty plan', () => {
   const plan = buildPlan('zzz qqq', extractTerms('zzz qqq'), FILES, { budget: 3000 });
   assert.equal(plan.items.length, 0);
   assert.match(renderPlan(plan), /No relevant code found/);
+});
+
+test('a small class stays one chunk; methods of a large class are named after it', () => {
+  const small = chunkFile('tests/test_cli.py', TEST_CLI_PY);
+  assert.ok(small.some(c => c.name === 'class TestRoutes' && c.lines.some(l => l.includes('runner.invoke(cli, ["routes"])'))));
+  const big = ['class Big:', '    def __init__(self):', pad(70), '    def other(self):', pad(70)].join('\n');
+  const names = chunkFile('src/big.py', big).map(c => c.name);
+  assert.ok(names.includes('Big.__init__') && names.includes('Big.other'), names.join(', '));
+});
+
+test('sibling pattern: adding a command brings the existing commands, their registration, test and docs', () => {
+  const CONFIG_PY = [
+    'class Config(dict):',
+    '    """The configuration: any key, secret key, token or password."""',
+    pad(30, '    # config configuration key secret token password json loaded'),
+  ].join('\n');
+  const files: SourceFile[] = [...FILES, { path: 'src/flask/config.py', text: CONFIG_PY }];
+  const terms = extractTerms(TASK_B);
+  const families = findFamilies(files, terms, TASK_B);
+  assert.equal(families[0]?.kind, 'command');
+  assert.deepEqual(families[0].members, ['run_command', 'shell_command', 'routes_command']);
+  assert.ok(families[0].registeredAt !== undefined, 'registration site found');
+
+  const plan = buildPlan(TASK_B, terms, files, { budget: 2500, families });
+  const why = (pred: (i: (typeof plan.items)[number]) => boolean): string =>
+    plan.items.filter(pred).map(i => i.reasons.join(' ')).join(' | ');
+  assert.match(why(i => i.path === 'src/flask/cli.py'), /where the existing commands are registered/);
+  assert.match(why(i => i.path === 'src/flask/cli.py'), /an existing command like the requested one/);
+  assert.match(why(i => i.name === 'class TestRoutes'), /tests the existing command "routes"/);
+  assert.match(why(i => i.path === 'docs/cli.rst'), /documents the existing command/);
+  assert.equal(plan.items[0].path, 'src/flask/cli.py', 'the pattern leads, code first');
+  assert.ok(plan.used <= plan.budget);
+  assert.match(renderPlan(plan), /Pattern: existing commands in src\/flask\/cli\.py: run_command, shell_command, routes_command/);
+});
+
+test('questions and generic prefixes never make a family', () => {
+  const HELPERS = ['def get_debug_flag():', '    return 1', '', 'def get_load_dotenv():', '    return 2', '', 'x = [get_debug_flag,', '     get_load_dotenv]'].join('\n');
+  const files: SourceFile[] = [{ path: 'src/flask/helpers.py', text: HELPERS }];
+  const question = 'Where is get_debug_flag defined, and what does it return?';
+  assert.deepEqual(findFamilies(files, extractTerms(question), question), []);
+  const generic = 'Add a new get helper next to get_debug_flag';
+  assert.deepEqual(findFamilies(files, extractTerms(generic), generic), []);
+});
+
+test("the project's own name is not a kind, and unregistered look-alikes give way to a registered family", () => {
+  const TESTING_PY = ['class FlaskClient:', '    pass', '', 'class FlaskCliRunner:', '    pass', ''].join('\n');
+  const files: SourceFile[] = [...FILES, { path: 'src/flask/testing.py', text: TESTING_PY }];
+  const families = findFamilies(files, extractTerms(TASK_B), TASK_B);
+  assert.deepEqual(families.map(f => f.kind), ['command']);
+});
+
+test('a heading that only shares a word with a member is not taken for its docs', () => {
+  const API_RST = ['URL Route Registrations', '-----------------------', '', 'Generally there are three ways to define rules for the routing system.', ''].join('\n');
+  const files: SourceFile[] = [...FILES, { path: 'docs/api.rst', text: API_RST }];
+  const terms = extractTerms(TASK_B);
+  const plan = buildPlan(TASK_B, terms, files, { budget: 4000, families: findFamilies(files, terms, TASK_B) });
+  assert.ok(!plan.items.some(i => i.path === 'docs/api.rst' && i.reasons.some(r => r.startsWith('documents'))));
 });

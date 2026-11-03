@@ -69,6 +69,8 @@ export type PanelMessage =
       budget: number;
       used: number;
       considered: number;
+      /** sibling patterns the retrieval followed, as sentences */
+      patterns: string[];
       items: { path: string; lines: string; name: string; tokens: number; reasons: string }[];
     }
   | {
@@ -141,6 +143,7 @@ export function planMessage(plan: ContextPlan, auto: boolean): PanelMessage {
     budget: plan.budget,
     used: plan.used,
     considered: plan.filesConsidered,
+    patterns: plan.patterns,
     items: plan.items.map(it => ({
       path: it.path,
       lines: `${it.startLine}-${it.endLine}`,

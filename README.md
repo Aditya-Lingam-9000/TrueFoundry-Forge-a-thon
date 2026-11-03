@@ -94,7 +94,7 @@ VS Code ── Forge Agent extension ──────────────�
 
 ### How context is selected
 The repository is larger than the model's context, so the agent never reads it wholesale.
-`retrieve_context(query, budget_tokens)` works in four steps:
+`retrieve_context(query, budget_tokens)` works in five steps:
 1. **Terms.** Identifiers and keywords from the request (snake/camel parts, light stemming,
    stop-words removed).
 2. **Candidates.**
@@ -102,12 +102,36 @@ The repository is larger than the model's context, so the agent never reads it w
    - Files whose path contains a term.
    - The tests and docs of the best implementation files (`tests/test_<name>.py`,
      `docs/<name>.rst`, …).
-3. **Chunks and ranking.** Candidates are split at function/class/heading boundaries, and the chunks
-   are scored with BM25. A chunk scores higher when it defines a matching name, when its path
-   matches, and when it is a test/doc companion.
-4. **Packing.** The best chunk of each top file goes in first, so implementation, tests and docs are
-   all represented. The rest of the budget is then filled by score. Oversized chunks are trimmed to
-   their densest window, and tokens are estimated at about 4 characters each.
+3. **Sibling pattern.** A request that *adds* something ("add a new built-in CLI command …") is
+   best served by the existing things of the same kind, not by files that share a word with the new
+   name. Words like "config" match `config.py` and `docs/config.rst`, but those are not where a
+   command goes.
+   - A *family* is two or more top-level definitions whose names share an affix that the request
+     uses as a plain word: `run_command`, `shell_command`, `routes_command` for "command".
+   - The editor then finds:
+     - the line that registers the family together (`FlaskGroup.__init__`);
+     - the files that name its members (their tests, `docs/api.rst`);
+     - the test class named after a member (`TestRoutes`);
+     - doc sections about a member ("Open a Shell").
+   - Only for requests that create something. Generic prefixes (`get_`, `set_`, `is_`, …) never form
+     a family, and a doc heading that merely shares a word with a member does not count.
+4. **Chunks and ranking.** Candidates are split at function/class/heading boundaries. A small class
+   stays one chunk, so a test class arrives whole; methods of a large class are named after it
+   (`FlaskGroup.__init__`). Chunks are scored with BM25. A chunk scores higher when it defines a
+   matching name, when its path matches, when it is a test/doc companion, and when it belongs to the
+   sibling pattern.
+5. **Packing.**
+   - The sibling pattern goes in first: the registration site, one existing member, its test and its
+     docs, up to 60% of the budget.
+   - Then the best chunk of each other top file, then the rest by score.
+   - Oversized chunks are trimmed: a class keeps its head (class line and fixtures), other chunks
+     their densest window. Tokens are estimated at about 4 characters each.
+
+For Task B (budget 2,500), this gives the agent `FlaskGroup.__init__` ("where the existing commands
+are registered"), `shell_command` ("an existing command like the requested one"), `TestRoutes`
+("tests the existing command routes") and "Open a Shell" ("documents the existing command shell").
+Before this step, the first three files were `config.py`, `docs/config.rst` and `test_config.py`.
+The Context Plan card shows each choice with its reason and the pattern it followed.
 
 The default budget is 4,000 tokens (`forgeAgent.contextBudgetTokens`, at most 4,500, because TrueForge refuses a single tool result over 24,000 characters). The tool result lists every
 chunk with its score and its reasons. After that the agent reads only precise ranges
