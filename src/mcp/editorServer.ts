@@ -19,6 +19,7 @@ import * as z from 'zod';
 import { definitions, renderPlan, type ContextPlan } from '../context/rank';
 import { retrieveContext } from '../context/retrieve';
 import type { ChangeController } from '../review/changeController';
+import { guardCommand } from './checkOnly';
 import type { CommandRunner } from './commandRunner';
 import { EXCLUDE_GLOB, resolveInWorkspace, searchWorkspace, toRel } from './workspace';
 
@@ -301,7 +302,9 @@ function buildServer(deps: EditorToolDeps): McpServer {
       description:
         'Run a shell command in the workspace (for example tests: "uv run --frozen pytest tests/test_cli.py -q"). ' +
         'The user approves the exact command first. Returns the exit code and the output (long output is trimmed). ' +
-        'Never use it to edit files: use propose_write.',
+        'Never use it to edit files: use propose_write. Linters and formatters always run in check mode ' +
+        '(ruff check --no-fix, ruff format --check, black --check, ...); git checkout/clean/reset/restore/stash ' +
+        'and pre-commit run are refused.',
       inputSchema: {
         command: z.string().min(1).describe('The command line to run'),
         cwd: z.string().optional().describe('Workspace-relative working directory (default: workspace root)'),
@@ -309,8 +312,14 @@ function buildServer(deps: EditorToolDeps): McpServer {
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
-    async ({ command, cwd, timeout_seconds }, extra) => {
+    async ({ command: requested, cwd, timeout_seconds }, extra) => {
       try {
+        const guard = guardCommand(requested);
+        if (guard.refused) {
+          log(`run_command(${requested}) refused: ${guard.refused}`);
+          return { content: [{ type: 'text', text: `Not run: ${guard.refused}` }], isError: true };
+        }
+        const command = guard.command;
         const r = await deps.commands.run(command, cwd, timeout_seconds ?? 180, extra.signal);
         log(`run_command(${command}) -> exit ${r.exitCode ?? 'killed'} in ${r.seconds.toFixed(1)} s`);
         const status = r.timedOut
@@ -318,8 +327,9 @@ function buildServer(deps: EditorToolDeps): McpServer {
           : r.killed
             ? 'stopped by the user'
             : `exit code ${r.exitCode}`;
+        const note = guard.notes.length ? `(check mode: ${guard.notes.join('; ')}; fix findings with propose_write)\n` : '';
         const result: ToolResult = {
-          content: [{ type: 'text', text: `$ ${command}\n[${status}, ${r.seconds.toFixed(1)} s]\n${r.output}` }],
+          content: [{ type: 'text', text: `$ ${command}\n${note}[${status}, ${r.seconds.toFixed(1)} s]\n${r.output}` }],
           isError: r.exitCode !== 0,
         };
         return result;

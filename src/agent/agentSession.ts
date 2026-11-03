@@ -17,6 +17,7 @@ import * as vscode from 'vscode';
 import { resolveMentions } from '../context/mentions';
 import { renderPlan, type ContextPlan } from '../context/rank';
 import { retrieveContext } from '../context/retrieve';
+import { guardCommand } from '../mcp/checkOnly';
 import type { EditorMcpEndpoint } from '../mcp/editorServer';
 import type { CommandRunner } from '../mcp/commandRunner';
 import type { ChangeController } from '../review/changeController';
@@ -776,7 +777,16 @@ function describeCommand(args: string): string {
   try {
     const v = JSON.parse(args) as { command?: unknown; cwd?: unknown; timeout_seconds?: unknown };
     const cwd = typeof v.cwd === 'string' && v.cwd ? `  (in ${v.cwd})` : '';
-    return `${typeof v.command === 'string' ? v.command : args}${cwd}`;
+    if (typeof v.command !== 'string') {
+      return `${args}${cwd}`;
+    }
+    // Show what will actually run: the editor makes linters check-only and refuses some commands.
+    const guard = guardCommand(v.command);
+    if (guard.refused) {
+      return `${v.command}${cwd}\n⛔ Will not run: ${guard.refused}`;
+    }
+    const note = guard.notes.length ? `\n(check mode: ${guard.notes.join('; ')})` : '';
+    return `${guard.command}${cwd}${note}`;
   } catch {
     return args;
   }

@@ -38,8 +38,15 @@ VS Code ── Forge Agent extension ──────────────�
     atomic edit, and the agent is told exactly which hunks were rejected.
   - Undo with Cmd/Ctrl+Z in the file, or with **Forge Agent: Revert Last Agent Change** (also works
     after saving).
-- **`run_command`** (e.g. tests), approved per command in the panel, with live output in the
+- **`run_command`** (e.g. tests, linters), approved per command in the panel, with live output in the
   "Forge Agent: Commands" channel.
+  - Every file change goes through a reviewed `propose_write`, so linters and formatters always run
+    in check mode (`ruff check --no-fix`, `ruff format --check`, `black --check`, …). The approval
+    card shows the exact command that will run.
+  - Commands that can discard uncommitted work (`git checkout/clean/reset/restore/stash`) and
+    `pre-commit run` are refused.
+- **Project conventions:** the agent also updates every place where similar features are listed
+  (API reference, changelog), and runs the project's linters on the files it changed before it answers.
 - **Inline edit (Cmd/Ctrl+I, or right-click → Forge Agent: Inline Edit…):** select code, type an
   instruction, review the diff beside the file, accept or reject each hunk.
   - Each inline edit is one fresh, lean TrueForge session ([`agent/inline-edit.json`](agent/inline-edit.json)).
