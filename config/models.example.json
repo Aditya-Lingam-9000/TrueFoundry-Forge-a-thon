@@ -29,6 +29,14 @@
             "context_length": 131072,
             "max_output_tokens": 16384
           }
+        },
+        {
+          "model_id": "nvidia/nemotron-3.5-bolt-e4b",
+          "name": "nemotron-3-5-bolt",
+          "properties": {
+            "context_length": 32768,
+            "max_output_tokens": 4096
+          }
         }
       ]
     },
@@ -77,6 +85,14 @@
         {
           "model_id": "openai/gpt-oss-120b",
           "name": "gpt-oss-120b",
+          "properties": {
+            "context_length": 131072,
+            "max_output_tokens": 4096
+          }
+        },
+        {
+          "model_id": "openai/gpt-oss-20b",
+          "name": "gpt-oss-20b",
           "properties": {
             "context_length": 131072,
             "max_output_tokens": 4096

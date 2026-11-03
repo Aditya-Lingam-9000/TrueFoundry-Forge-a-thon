@@ -184,6 +184,10 @@ export class AgentSession {
   private outcome: TurnOutcome = { status: 'done' };
   /** the last request was stopped by the user: the next message says it must not be resumed */
   private stoppedTask = false;
+  /** inline edit: propose_write calls whose successful result ends the edit (no closing model call) */
+  private finishAfter = new Set<string>();
+  /** propose_write calls whose every hunk the user rejected in this send */
+  private userRejected = new Set<string>();
   /** reviewed writes and approved commands of the current send, in order (for the done-check) */
   private steps: WorkStep[] = [];
   /** model the current session runs on (it changes when the editor falls back to another model) */
@@ -294,6 +298,8 @@ export class AgentSession {
     this.controller = controller;
     this.callsById = new Map();
     this.steps = [];
+    this.finishAfter = new Set();
+    this.userRejected = new Set();
     const started = Date.now();
     if (this.d.oneShot) {
       this.sessionId = null;
@@ -387,6 +393,9 @@ export class AgentSession {
           await this.denyAndCancel(sessionId, approvals);
           break;
         }
+        if (options.scope && this.inlineEditSettled(sessionId, decisions)) {
+          break;
+        }
         input = decisions;
       }
       const followUp = pass === 0 && !controller.signal.aborted ? this.doneCheck() : undefined;
@@ -418,6 +427,34 @@ export class AgentSession {
       this.d.post({ type: 'busy', busy: false });
     }
     return this.outcome;
+  }
+
+  /**
+   * An inline edit is settled by the user's review: once the accepted change is applied (see the
+   * tool.response handling in consume) or every hunk is rejected, no further model call is needed.
+   * Ending there makes an inline edit a single model call, which also spares models whose provider
+   * rejects the replayed reasoning of an earlier call. Returns true when the edit ends now.
+   */
+  private inlineEditSettled(sessionId: string, decisions: TurnInput[]): boolean {
+    const writes = decisions.filter(
+      (d): d is Extract<TurnInput, { type: 'user.tool_approval' }> =>
+        d.type === 'user.tool_approval' && this.callsById.get(d.tool_call_id)?.name === 'propose_write',
+    );
+    if (writes.length !== decisions.length || writes.length === 0) {
+      return false;
+    }
+    if (writes.every(d => this.userRejected.has(d.tool_call_id))) {
+      this.outcome = { status: 'done', message: 'You rejected the change — nothing was written.' };
+      this.d.post({ type: 'status', kind: 'ok', text: 'Rejected — nothing written.' });
+      void this.d.client.cancel(sessionId).catch(() => undefined);
+      return true;
+    }
+    for (const d of writes) {
+      if (d.approval.status === 'allow') {
+        this.finishAfter.add(d.tool_call_id);
+      }
+    }
+    return false;
   }
 
   /**
@@ -682,6 +719,7 @@ export class AgentSession {
       const n = accepted.filter(Boolean).length;
       if (n === 0) {
         this.d.post({ ...summary, state: 'rejected' });
+        this.userRejected.add(ref.callId);
         return deny(
           `The user rejected every hunk of the proposed change to ${proposal.rel}. Nothing was written. ` +
             'Do not propose the same change again: briefly say what you wanted to change and ask the user how to proceed.',
@@ -872,6 +910,7 @@ export class AgentSession {
     const approvals: ApprovalRef[] = [];
     let turnId: string | undefined;
     let sawDone = false;
+    let finishedEarly = false;
 
     const flushCalls = (messageId: string): void => {
       for (const [key, call] of toolCalls) {
@@ -970,6 +1009,9 @@ export class AgentSession {
             preview: content.length > 1200 ? `${content.slice(0, 1200)}\n… (${content.length} characters)` : content,
             isError,
           });
+          if (!isError && this.finishAfter.has(callId)) {
+            finishedEarly = true; // inline edit applied: the model's closing message is not needed
+          }
           break;
         }
         case 'tool.approval_required': {
@@ -1008,6 +1050,16 @@ export class AgentSession {
         }
         default:
           break;
+      }
+      if (finishedEarly) {
+        // The inline edit is applied: end here instead of waiting for the model's closing call.
+        const secs = ((Date.now() - started) / 1000).toFixed(1);
+        this.outcome = { status: 'done' };
+        this.d.post({ type: 'status', kind: 'ok', text: `Done in ${secs} s — the edit is applied.` });
+        if (this.sessionId) {
+          void this.d.client.cancel(this.sessionId).catch(() => undefined);
+        }
+        return { approvals: [], turnId };
       }
     }
     if (!sawDone) {

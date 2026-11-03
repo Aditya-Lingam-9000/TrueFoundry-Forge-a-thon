@@ -61,6 +61,9 @@ VS Code ── Forge Agent extension ──────────────�
     if really needed).
   - The edit is anchored to the selected lines, so a repeated snippet elsewhere can't be hit. Any
     change outside the selection is refused before the user sees it.
+  - The review settles the edit. Once the accepted change is applied (or every hunk is rejected),
+    the session ends with no closing model call. An inline edit is therefore one model call, which
+    keeps it fast and works with models that fail on a second call.
   - Progress streams in a cancellable notification and in the agent panel. A failing model shows a
     clear error, and nothing is written.
 
@@ -219,7 +222,7 @@ sends inline when it creates a session.
 | `forgeAgent.trueforgeUrl` | `http://127.0.0.1:8790` | TrueForge base URL |
 | `forgeAgent.model` | *(empty → spec)* | Model override, `<provider>/<model>` |
 | `forgeAgent.agentDefinition` | *(bundled spec)* | Path to another agent spec |
-| `forgeAgent.fallbackModels` | `nvidia-backup/nemotron-3-5-lightning`, `groq/gpt-oss-120b` | Models that take over automatically, in order |
+| `forgeAgent.fallbackModels` | `nvidia-backup/nemotron-3-5-lightning` | Models that take over automatically, in order |
 | `forgeAgent.mcpServerName` | `forge-editor` | Name of the editor MCP server in TrueForge |
 
 ## Model setup
@@ -233,8 +236,12 @@ The extension works with whatever model TrueForge is configured with.
   1. `nvidia-backup/nemotron-3-5-lightning`: Nemotron 3.5 Lightning (30B MoE, 3B active). It is
      registered as a separate provider entry, so a broken key or URL on the primary entry does not
      break it.
-  2. `groq/gpt-oss-120b`: a second vendor. Its free tier allows 8,000 tokens per minute, enough
-     for small edits (Task A), not for long multi-file tasks.
+  2. Not in the default chain: `groq/gpt-oss-120b` and `groq/gpt-oss-20b` (a second vendor, registered).
+     - TrueForge 0.182.0 replays a model's earlier reasoning to OpenAI-compatible providers as
+       `reasoning_content`, and Groq rejects that field (HTTP 400). So the first call works and the
+       second fails.
+     - Inline edits are a single call, so they work on Groq; multi-step tasks do not.
+     - Add Groq to `forgeAgent.fallbackModels` only for inline-edit use.
 - `nvidia/minimax-m3-1-flash` is also registered, but it is often very slow on the free tier.
 - **Self-hosted alternative:** open models on free Kaggle accelerators behind an authenticated
   OpenAI-compatible endpoint: Qwen3-Coder-30B on 2×T4 via Ollama, Qwen3.8-27B on a TPU v5e-8 via

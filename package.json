@@ -106,8 +106,7 @@
             "type": "string"
           },
           "default": [
-            "nvidia-backup/nemotron-3-5-lightning",
-            "groq/gpt-oss-120b"
+            "nvidia-backup/nemotron-3-5-lightning"
           ],
           "description": "Models (`<provider>/<model>` configured in TrueForge) that take over automatically, in order, when the current model fails (invalid key, unreachable endpoint, rate limit after one retry). Use a different provider than the primary model."
         },
