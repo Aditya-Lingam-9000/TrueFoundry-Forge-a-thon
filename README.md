@@ -167,9 +167,14 @@ agent (in TrueForge) ──propose_write──▶ TrueForge pauses: tool.approva
 
 ## Requirements
 - **Node.js ≥ 22.14** (TrueForge's requirement; the extension builds with any Node ≥ 20)
-- **VS Code ≥ 1.90**
-- A model reachable by TrueForge. Any OpenAI-compatible endpoint, or a native provider (OpenAI,
+- **VS Code ≥ 1.90** and **Git**
+- **[uv](https://docs.astral.sh/uv/)**. It sets up the Flask working copy, and the agent runs the
+  project's tests and linters with `uv run --frozen pytest …` / `uv run --frozen ruff …`.
+- A model reachable by TrueForge: any OpenAI-compatible endpoint, or a native provider (OpenAI,
   Anthropic, Gemini, Z.ai, …). See [Model setup](#model-setup).
+  - The default is the free NVIDIA API: sign in at [build.nvidia.com](https://build.nvidia.com),
+    open any model page and choose **Get API Key** (it starts with `nvapi-`).
+  - A Groq key ([console.groq.com](https://console.groq.com)) is optional.
 
 ## Setup from a clean clone
 ```bash
@@ -178,6 +183,22 @@ cd TrueFoundry-Forge-a-thon
 npm install
 npm run compile
 ```
+npm 11 may warn that esbuild's install script needs approval (`allow-scripts`). The build works
+regardless.
+
+### 0. The Flask working copy (the repository the agent works on)
+The fixed tasks use pallets/flask at tag 3.1.3 (commit `22d92470`). The launch configuration opens
+it from `../repos/flask-work`, next to this repository:
+```bash
+mkdir -p ../repos
+git clone --branch 3.1.3 https://github.com/pallets/flask.git ../repos/flask-work
+(cd ../repos/flask-work && uv sync --frozen)
+```
+- `--frozen` installs from `uv.lock` without rewriting it, so `git status` stays clean (Task C
+  checks that).
+- Do not put a `.env` file in a folder *above* the Flask copy: Flask's CLI also loads `.env` files
+  from parent folders. The `.env` with your keys belongs in this repository (step 2), which is a
+  sibling.
 
 ### 1. Start TrueForge locally (terminal 1, leave it running)
 ```bash
@@ -200,10 +221,11 @@ Keys can also be exported instead of written to `.env`. The script never prints 
 Or add the provider in the TrueForge UI under Settings → Model providers.
 
 ### 3. Run the extension
-Open this folder in VS Code and press **F5** ("Run Forge Agent").
-- A new VS Code window opens with the extension loaded and `../repos/flask-work` (a working clone
-  of pallets/flask at tag 3.1.3) as its workspace. Edit `.vscode/launch.json` to open another
-  repository.
+Open this folder in VS Code and press **F5** ("Run Forge Agent (Flask working copy)").
+- A new VS Code window opens with the extension loaded and `../repos/flask-work` (step 0) as its
+  workspace. Edit `.vscode/launch.json` to open another repository.
+- The **Forge Agent** panel should say *Connected to TrueForge 0.182.0*, with the model in its
+  header.
 - Open the **Forge Agent** view in the activity bar and ask about the repository, e.g.
   *"Where is `get_debug_flag` defined and what does it do?"*
 - **Open in TrueForge** (panel header) shows the same session in TrueForge's UI: turns, tool calls,
@@ -216,12 +238,74 @@ sends inline when it creates a session.
   configured in TrueForge).
 - The `forge-editor` MCP server is registered automatically when the extension starts.
 
+## Running the fixed tasks
+- Start TrueForge (step 1), register the models (step 2), then press F5 (step 3).
+- Verification commands run in a terminal in the Flask copy:
+  `cd ../repos/flask-work && source .venv/bin/activate`.
+- Reset the Flask copy between runs (in the Flask copy only):
+  `git checkout -- . && git clean -fd -e .venv`.
+
+**Task A, inline edit.**
+1. Open `src/flask/helpers.py` and select the function `get_debug_flag`.
+2. Press **Cmd/Ctrl+I** and give the instruction: *Treat the values 'off' and 'n' as false as well,
+   case-insensitively, and update the docstring to list every value that is treated as false.*
+3. The diff opens beside the file. Accept or reject each hunk.
+4. Check:
+   ```bash
+   FLASK_DEBUG=off python -c "from flask.helpers import get_debug_flag; print(get_debug_flag())"   # False
+   ```
+5. Undo: **Forge Agent: Revert Last Agent Change**, or Cmd/Ctrl+Z in the file.
+
+**Task B, agent mode (no files named).**
+1. In the Forge Agent panel, click **New**.
+2. Send: *Add a new built-in CLI command flask config that prints the loaded application's
+   configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as
+   "\*\*\*". It must appear in flask --help, be covered by a test, and be documented alongside the
+   other built-in commands.*
+3. Watch the run:
+   - the 🧭 Context Plan card, with the 🧩 sibling pattern;
+   - the scout sub-agent;
+   - one review per file;
+   - Allow/Deny cards for `pytest` and `ruff`, which run in check mode.
+4. **Open in TrueForge** shows the session: turns, tool calls and the scout thread.
+5. Check:
+   ```bash
+   pytest tests/test_cli.py -q
+   (cd tests/test_apps/helloworld && flask --app hello config)   # JSON, "SECRET_KEY": "***"
+   git diff --stat                                              # at least 3 files
+   ```
+
+**Task C, resilience.**
+1. Break the primary provider:
+   ```bash
+   node scripts/simulate-failure.mjs invalid-key   # or: unreachable
+   ```
+   (Run this in terminal 2, in this repository.)
+2. `git status --short` in the Flask copy shows nothing.
+3. Repeat Task A. A **⚠ Model fallback** card and a toast show the primary failing (401, or
+   *Cannot connect*). `nvidia-backup/nemotron-3-5-lightning` takes over, and the diff opens with no
+   user action.
+4. Before you accept, `git status --short` still shows nothing.
+5. Restore:
+   ```bash
+   node scripts/register-models.mjs --env .env
+   ```
+   Then click **New**.
+
+**Stop** (■ in the panel, or ✕ on the inline-edit notification) ends a run at any point. This
+includes while a review is open, a command runs, or the scout works. Nothing unapproved is written,
+and a running command's whole process tree is killed.
+
 ## Settings
 | Setting | Default | Meaning |
 |---|---|---|
 | `forgeAgent.trueforgeUrl` | `http://127.0.0.1:8790` | TrueForge base URL |
 | `forgeAgent.model` | *(empty → spec)* | Model override, `<provider>/<model>` |
 | `forgeAgent.agentDefinition` | *(bundled spec)* | Path to another agent spec |
+| `forgeAgent.inlineAgentDefinition` | *(bundled inline-edit spec)* | Path to another inline-edit spec |
+| `forgeAgent.contextBudgetTokens` | `4000` | Token budget of `retrieve_context` (at most 4,500) |
+| `forgeAgent.autoContextTokens` | `2500` | Context retrieved automatically for each chat message (0 = off) |
+| `forgeAgent.mentionBudgetTokens` | `3000` | Budget for files and symbols attached with @-mentions |
 | `forgeAgent.fallbackModels` | `nvidia-backup/nemotron-3-5-lightning` | Models that take over automatically, in order |
 | `forgeAgent.mcpServerName` | `forge-editor` | Name of the editor MCP server in TrueForge |
 
@@ -253,7 +337,7 @@ The extension works with whatever model TrueForge is configured with.
 ```bash
 npm run watch       # rebuild on change
 npm run typecheck   # tsc --noEmit
-npm test            # unit tests (diff/hunk engine)
+npm test            # 67 unit tests: diff/hunks, edits, retrieval, fallback, done-check, command guard, kickoff
 npm run check       # typecheck + build + tests
 ```
 Logs: **Forge Agent: Show Log** (command palette).
