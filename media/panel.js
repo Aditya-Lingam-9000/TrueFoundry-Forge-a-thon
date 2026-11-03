@@ -75,6 +75,74 @@
     }
   }
 
+  function renderContextPlan(m) {
+    const card = el('details', 'card plan');
+    card.open = true;
+    const files = new Set(m.items.map(it => it.path)).size;
+    const summary = el('summary', 'card-title');
+    summary.textContent =
+      (m.auto ? '🧭 Auto context (from your request)' : '🧭 Context plan (agent)') + ' · ' +
+      files + ' file(s), ' + m.items.length + ' chunk(s) · ' +
+      m.used.toLocaleString() + ' / ' + m.budget.toLocaleString() + ' tokens';
+    card.appendChild(summary);
+    const meter = el('div', 'meter');
+    const fill = el('div', 'meter-fill');
+    fill.style.width = Math.min(100, Math.round((100 * m.used) / Math.max(1, m.budget))) + '%';
+    meter.appendChild(fill);
+    card.appendChild(meter);
+    card.appendChild(el('div', 'card-detail', 'for: ' + m.query + '  ·  ranked ' + m.considered + ' candidate files'));
+    const list = el('ol', 'plan-list');
+    for (const it of m.items) {
+      const li = el('li');
+      li.appendChild(el('span', 'plan-path', it.path + ':' + it.lines));
+      li.appendChild(el('span', 'muted', '  ' + it.name + ' · ' + it.tokens + ' tok'));
+      li.appendChild(el('div', 'plan-why', it.reasons));
+      list.appendChild(li);
+    }
+    card.appendChild(list);
+    log.appendChild(card);
+  }
+
+  function renderMentions(m) {
+    const card = el('div', 'card plan');
+    card.appendChild(el('div', 'card-title', '📎 @-mentions attached'));
+    const list = el('ul', 'plan-list');
+    for (const it of m.items) {
+      const li = el('li');
+      li.appendChild(el('span', 'plan-path', '@' + it.token));
+      li.appendChild(
+        el('span', it.resolved ? 'muted' : 'muted', it.resolved ? '  → ' + it.where + ' (' + it.kind + ')' : '  ✗ not found'),
+      );
+      if (it.note) li.appendChild(el('div', 'plan-why', it.note));
+      list.appendChild(li);
+    }
+    card.appendChild(list);
+    log.appendChild(card);
+  }
+
+  const subagentCards = new Map(); // threadId -> element
+
+  function renderSubagent(m) {
+    let card = subagentCards.get(m.threadId);
+    if (!card) {
+      card = el('details', 'card subagent');
+      subagentCards.set(m.threadId, card);
+      log.appendChild(card);
+    }
+    const wasOpen = card.open;
+    card.className = 'card subagent ' + (m.state === 'running' ? 'pending' : m.state === 'done' ? 'accepted' : 'rejected');
+    card.textContent = '';
+    const summary = el('summary', 'card-title');
+    const status = m.state === 'running' ? 'exploring…' : m.state === 'done' ? 'reported back' : 'failed';
+    summary.textContent =
+      '🛰 Sub-agent "' + m.name + '" · ' + status + ' · ' + m.tools + ' tool call(s)' +
+      (m.lastTool && m.state === 'running' ? ' · last: ' + m.lastTool : '');
+    card.appendChild(summary);
+    if (m.task) card.appendChild(el('div', 'card-detail', 'task: ' + m.task));
+    if (m.result) card.appendChild(el('pre', 'card-command', m.result));
+    card.open = wasOpen || m.state !== 'running';
+  }
+
   function renderApplied(m) {
     for (const c of appliedCards.values()) {
       const b = c.querySelector('button');
@@ -224,6 +292,15 @@
       case 'applied':
         renderApplied(m);
         break;
+      case 'contextPlan':
+        renderContextPlan(m);
+        break;
+      case 'mentions':
+        renderMentions(m);
+        break;
+      case 'subagent':
+        renderSubagent(m);
+        break;
       case 'reverted':
         renderReverted(m);
         break;
@@ -244,6 +321,7 @@
           reviewCards.clear();
           approvalCards.clear();
           appliedCards.clear();
+          subagentCards.clear();
           log.appendChild(el('div', 'hint', 'New session. Ask anything about the open repository.'));
           setStatus('info', '');
         }

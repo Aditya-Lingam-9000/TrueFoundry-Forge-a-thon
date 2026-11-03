@@ -12,7 +12,11 @@ export HOST="${HOST:-127.0.0.1}"
 
 # TrueForge's outbound-URL guard blocks loopback by default. The extension serves its editor tools
 # as an MCP server on 127.0.0.1, so TrueForge must be allowed to call it.
-export OUTBOUND_URL_ALLOWED_HOSTS='["127.0.0.1","localhost"]'
+# Model API hosts are allowlisted too: on IPv6-only networks with NAT64 (common on mobile/fibre ISPs)
+# IPv4-only hosts resolve to synthetic 64:ff9b:: addresses, which the guard would otherwise refuse.
+# Add hosts with EXTRA_ALLOWED_HOSTS='"api.example.com","other.example.org"'.
+ALLOWED='"127.0.0.1","localhost","integrate.api.nvidia.com","api.z.ai","api.groq.com","api.mistral.ai"'
+export OUTBOUND_URL_ALLOWED_HOSTS="[${ALLOWED}${EXTRA_ALLOWED_HOSTS:+,${EXTRA_ALLOWED_HOSTS}}]"
 # run_command (e.g. a test suite) can take longer than TrueForge's 2-minute MCP default, and a turn
 # on a slow model can take longer than its 10-minute default.
 export MCP_REQUEST_TIMEOUT_MS="${MCP_REQUEST_TIMEOUT_MS:-900000}"

@@ -126,7 +126,7 @@ export class AgentPanelProvider implements vscode.WebviewViewProvider {
   </main>
   <footer>
     <div id="status" class="muted"></div>
-    <textarea id="input" rows="3" placeholder="Ask the agent… (Enter to send, Shift+Enter for a new line)"></textarea>
+    <textarea id="input" rows="3" placeholder="Ask the agent… Use @file.py or @function_name to attach code. (Enter to send, Shift+Enter for a new line)"></textarea>
     <div class="row">
       <span class="spacer"></span>
       <button id="stop" class="secondary" disabled>Stop</button>

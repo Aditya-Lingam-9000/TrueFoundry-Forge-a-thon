@@ -16,6 +16,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import * as vscode from 'vscode';
 import * as z from 'zod';
+import { definitions, renderPlan, type ContextPlan } from '../context/rank';
+import { retrieveContext } from '../context/retrieve';
 import type { ChangeController } from '../review/changeController';
 import type { CommandRunner } from './commandRunner';
 import { EXCLUDE_GLOB, resolveInWorkspace, searchWorkspace, toRel } from './workspace';
@@ -24,6 +26,10 @@ export interface EditorToolDeps {
   log: (msg: string) => void;
   changes: ChangeController;
   commands: CommandRunner;
+  /** default token budget of retrieve_context */
+  contextBudget: () => number;
+  /** every context plan, so the panel can show what was chosen and why */
+  onContextPlan?: (plan: ContextPlan) => void;
 }
 
 const EDIT_SCHEMA = z.object({
@@ -31,8 +37,10 @@ const EDIT_SCHEMA = z.object({
   new_text: z.string().describe('Replacement text'),
 });
 
-const MAX_READ_LINES = 400;
-const MAX_READ_CHARS = 40_000;
+const MAX_READ_LINES = 200;
+/** read_file without a range returns the outline instead for files longer than this */
+const WHOLE_FILE_LIMIT = 250;
+const MAX_READ_CHARS = 16_000;
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
 
@@ -47,7 +55,79 @@ function fail(err: unknown): ToolResult {
 /** Builds a fresh MCP server with the editor tools (stateless: one per HTTP request). */
 function buildServer(deps: EditorToolDeps): McpServer {
   const { log } = deps;
-  const server = new McpServer({ name: 'forge-editor', version: '0.2.0' });
+  const server = new McpServer({ name: 'forge-editor', version: '0.3.0' });
+
+  server.registerTool(
+    'retrieve_context',
+    {
+      title: 'Retrieve relevant code',
+      description:
+        'START HERE for any task. Describe the task in plain words; returns the most relevant code of the ' +
+        'repository (functions, classes, doc sections — not whole files), ranked and packed into a token budget, ' +
+        'with the reason each piece was chosen. Implementation, its tests and its docs are covered together. ' +
+        'Use search_code / file_outline / read_file afterwards only for what is still missing.',
+      inputSchema: {
+        query: z.string().min(3).describe('The task or question, with any names you know (functions, commands, files)'),
+        budget_tokens: z
+          .number()
+          .int()
+          .min(1000)
+          .max(24000)
+          .optional()
+          .describe('Token budget for the returned code (default from settings, usually 4000; capped at 4500)'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ query, budget_tokens }) => {
+      try {
+        const plan = await retrieveContext(query, budget_tokens ?? deps.contextBudget());
+        const files = new Set(plan.items.map(i => i.path)).size;
+        log(`retrieve_context(${JSON.stringify(query.slice(0, 80))}) -> ${plan.items.length} chunks / ${files} files, ${plan.used}/${plan.budget} tokens`);
+        deps.onContextPlan?.(plan);
+        return ok(renderPlan(plan));
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'file_outline',
+    {
+      title: 'File outline',
+      description:
+        'List the functions, classes and section headings of a file with their line numbers, so you can read ' +
+        'exactly the right range with read_file instead of the whole file.',
+      inputSchema: {
+        path: z.string().describe('Workspace-relative path'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ path: relPath }) => {
+      try {
+        const { abs, rel } = resolveInWorkspace(relPath);
+        const open = vscode.workspace.textDocuments.find(d => d.uri.fsPath === abs);
+        const text = (open ? open.getText() : await fs.promises.readFile(abs, 'utf8')).replace(/\r\n/g, '\n');
+        const lines = text.split('\n');
+        const defs = definitions(rel, lines);
+        log(`file_outline(${rel}) -> ${defs.length} entries`);
+        if (defs.length === 0) {
+          return ok(`${rel}: ${lines.length} lines, no functions/classes/headings recognised. Use read_file with a range.`);
+        }
+        return ok(
+          `${rel} (${lines.length} lines)\n` +
+            defs
+              .map((d, i) => {
+                const end = defs[i + 1]?.line ?? lines.length;
+                return `${String(d.line + 1).padStart(5)}-${String(end).padEnd(5)} ${d.name}`;
+              })
+              .join('\n'),
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
 
   server.registerTool(
     'list_files',
@@ -85,8 +165,9 @@ function buildServer(deps: EditorToolDeps): McpServer {
     {
       title: 'Read file',
       description:
-        `Read a workspace file with line numbers. Reads at most ${MAX_READ_LINES} lines per call: ` +
-        'use start_line/end_line for large files (the reply states the total line count).',
+        `Read a workspace file with line numbers. Reads at most ${MAX_READ_LINES} lines per call. ` +
+        'Prefer a precise start_line/end_line range (find it with retrieve_context or file_outline) over reading ' +
+        'whole files; the reply states the total line count.',
       inputSchema: {
         path: z.string().describe('Workspace-relative path, e.g. src/flask/helpers.py'),
         start_line: z.number().int().min(1).optional().describe('First line to read (1-based), default 1'),
@@ -101,6 +182,19 @@ function buildServer(deps: EditorToolDeps): McpServer {
         const open = vscode.workspace.textDocuments.find(d => d.uri.fsPath === abs);
         const text = open ? open.getText() : await fs.promises.readFile(abs, 'utf8');
         const lines = text.split(/\r?\n/);
+        if (start_line === undefined && end_line === undefined && lines.length > WHOLE_FILE_LIMIT) {
+          // Paging through a big file fills the context window; give the map instead.
+          const defs = definitions(rel, lines);
+          log(`read_file(${rel}) -> outline only (${lines.length} lines)`);
+          const outline = defs
+            .map((d, i) => `${String(d.line + 1).padStart(5)}-${String(defs[i + 1]?.line ?? lines.length).padEnd(5)} ${d.name}`)
+            .join('\n');
+          return ok(
+            `${rel} has ${lines.length} lines: too long to read at once. Read only the range you need with ` +
+              `start_line/end_line (at most ${MAX_READ_LINES} lines).` +
+              (outline ? `\nOutline (start-end  definition):\n${outline}` : ' Use search_code to find the right lines.'),
+          );
+        }
         const start = Math.min(start_line ?? 1, Math.max(lines.length, 1));
         const end = Math.min(end_line ?? start + MAX_READ_LINES - 1, start + MAX_READ_LINES - 1, lines.length);
         let body = '';

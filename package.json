@@ -98,12 +98,33 @@
         "forgeAgent.model": {
           "type": "string",
           "default": "",
-          "description": "Model as `<provider>/<model>` configured in TrueForge (e.g. kaggle-t4x2/qwen3-coder-30b). Empty = the model in the agent definition."
+          "description": "Model as `<provider>/<model>` configured in TrueForge (e.g. nvidia/nemotron-3-5-super). Empty = the model in the agent definition."
         },
         "forgeAgent.agentDefinition": {
           "type": "string",
           "default": "",
           "description": "Path to an agent definition JSON. Empty = the bundled agent/forge-agent.json."
+        },
+        "forgeAgent.contextBudgetTokens": {
+          "type": "number",
+          "default": 4000,
+          "minimum": 1000,
+          "maximum": 4500,
+          "description": "Token budget of retrieve_context: how much ranked code the agent receives per retrieval."
+        },
+        "forgeAgent.autoContextTokens": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 0,
+          "maximum": 4500,
+          "description": "Token budget of the context the editor retrieves automatically for each chat message (0 = off)."
+        },
+        "forgeAgent.mentionBudgetTokens": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 500,
+          "maximum": 6000,
+          "description": "Token budget for files and symbols attached with @-mentions (@path/to/file.py, @function_name)."
         },
         "forgeAgent.inlineAgentDefinition": {
           "type": "string",
@@ -122,7 +143,7 @@
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "esbuild src/review/diff.test.ts src/review/edits.test.ts --bundle --platform=node --format=cjs --outdir=dist/test --log-level=warning && node --test dist/test/diff.test.js dist/test/edits.test.js",
+    "test": "esbuild src/review/diff.test.ts src/review/edits.test.ts src/context/rank.test.ts --bundle --platform=node --format=cjs --outdir=dist/test --entry-names=[name] --log-level=warning && node --test dist/test/diff.test.js dist/test/edits.test.js dist/test/rank.test.js",
     "check": "npm run typecheck && npm run compile && npm test"
   },
   "dependencies": {

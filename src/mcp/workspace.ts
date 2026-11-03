@@ -70,7 +70,24 @@ function ripgrepPath(): string | null {
   return rgPathCache;
 }
 
-export async function searchWorkspace(opts: SearchOptions): Promise<{ hits: SearchHit[]; engine: string; truncated: boolean }> {
+/**
+ * Models often write grep-style alternation ("a\|b\|c") even in plain-text mode: treat it as
+ * "any of these" instead of searching for the literal backslash-bar.
+ */
+export function normalizeQuery(opts: SearchOptions): SearchOptions {
+  const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!opts.isRegex && opts.query.includes('\\|')) {
+    const parts = opts.query.split('\\|').map(p => p.trim()).filter(Boolean);
+    return { ...opts, isRegex: true, query: parts.map(escape).join('|') };
+  }
+  if (opts.isRegex && opts.query.includes('\\|')) {
+    return { ...opts, query: opts.query.replace(/\\\|/g, '|') }; // BRE alternation → regex alternation
+  }
+  return opts;
+}
+
+export async function searchWorkspace(rawOpts: SearchOptions): Promise<{ hits: SearchHit[]; engine: string; truncated: boolean }> {
+  const opts = normalizeQuery(rawOpts);
   const rg = ripgrepPath();
   if (rg) {
     try {

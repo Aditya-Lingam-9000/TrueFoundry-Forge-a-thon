@@ -1,16 +1,86 @@
 {
-  "_comment": "Model providers for TrueForge. Copy to config/models.json (git-ignored), fill in base URLs, and export the keys referenced as ${ENV_VAR}; then run: node scripts/register-models.mjs. Keys are never written to this repository. Any OpenAI-compatible endpoint works as a `custom` provider; native types (openai, anthropic, google-gemini, zai, ...) work too.",
+  "_comment": "Model providers for TrueForge. Copy to config/models.json (git-ignored), keep the providers you use, put the keys referenced as ${ENV_VAR} in a .env file (or export them), then run: node scripts/register-models.mjs --env <path to .env>. Providers whose key is missing, or whose base_url still has a <placeholder>, are skipped. Keys are never written to this repository.",
   "providers": [
+    {
+      "type": "custom",
+      "name": "nvidia",
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "auth": {
+        "api_key": "${NVIDIA_KEY}"
+      },
+      "models": [
+        {
+          "model_id": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+          "name": "nemotron-3-5-super",
+          "properties": {
+            "context_length": 131072,
+            "max_output_tokens": 16384,
+            "reasoning_efforts": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        {
+          "model_id": "minimaxai/minimax-m3.1-flash",
+          "name": "minimax-m3-1-flash",
+          "properties": {
+            "context_length": 131072,
+            "max_output_tokens": 16384
+          }
+        }
+      ]
+    },
+    {
+      "type": "zai",
+      "auth": {
+        "api_key": "${ZAI_API_KEY}"
+      },
+      "models": [
+        {
+          "model_id": "glm-4.7-flash",
+          "name": "glm-4-7-flash",
+          "properties": {
+            "context_length": 131072,
+            "max_output_tokens": 8192
+          }
+        }
+      ]
+    },
+    {
+      "type": "custom",
+      "name": "groq",
+      "base_url": "https://api.groq.com/openai/v1",
+      "auth": {
+        "api_key": "${GROQ_API_KEY}"
+      },
+      "models": [
+        {
+          "model_id": "openai/gpt-oss-120b",
+          "name": "gpt-oss-120b",
+          "properties": {
+            "context_length": 131072,
+            "max_output_tokens": 8192
+          }
+        }
+      ]
+    },
     {
       "type": "custom",
       "name": "kaggle-t4x2",
       "base_url": "https://<your-session>.trycloudflare.com/v1",
-      "auth": { "api_key": "${FORGE_API_KEY}" },
+      "auth": {
+        "api_key": "${FORGE_API_KEY}"
+      },
       "models": [
         {
           "model_id": "qwen3-coder:30b",
           "name": "qwen3-coder-30b",
-          "properties": { "context_length": 49152, "max_output_tokens": 8192 }
+          "properties": {
+            "context_length": 49152,
+            "max_output_tokens": 8192
+          }
         }
       ]
     },
@@ -18,24 +88,17 @@
       "type": "custom",
       "name": "kaggle-tpu",
       "base_url": "https://<your-session>.trycloudflare.com/v1",
-      "auth": { "api_key": "${FORGE_API_KEY}" },
+      "auth": {
+        "api_key": "${FORGE_API_KEY}"
+      },
       "models": [
         {
           "model_id": "qwen3.8-27b",
           "name": "qwen3-8-27b",
-          "properties": { "context_length": 131072, "max_output_tokens": 16384 }
-        }
-      ]
-    },
-    {
-      "type": "custom",
-      "name": "local-ollama",
-      "base_url": "http://127.0.0.1:11434/v1",
-      "models": [
-        {
-          "model_id": "qwen3-coder:30b",
-          "name": "qwen3-coder-30b",
-          "properties": { "context_length": 32768, "max_output_tokens": 8192 }
+          "properties": {
+            "context_length": 131072,
+            "max_output_tokens": 16384
+          }
         }
       ]
     }

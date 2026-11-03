@@ -14,6 +14,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { resolveMentions } from '../context/mentions';
+import { renderPlan, type ContextPlan } from '../context/rank';
+import { retrieveContext } from '../context/retrieve';
 import type { EditorMcpEndpoint } from '../mcp/editorServer';
 import type { CommandRunner } from '../mcp/commandRunner';
 import type { ChangeController } from '../review/changeController';
@@ -52,6 +55,30 @@ export type PanelMessage =
       detail?: string;
     }
   | { type: 'approval'; callId: string; title: string; detail: string; state: ApprovalState }
+  | {
+      type: 'contextPlan';
+      /** true: retrieved by the editor from the user's message; false: the agent called retrieve_context */
+      auto: boolean;
+      query: string;
+      budget: number;
+      used: number;
+      considered: number;
+      items: { path: string; lines: string; name: string; tokens: number; reasons: string }[];
+    }
+  | {
+      type: 'mentions';
+      items: { token: string; kind: 'file' | 'symbol'; resolved: boolean; where?: string; note?: string }[];
+    }
+  | {
+      type: 'subagent';
+      threadId: string;
+      name: string;
+      task: string;
+      state: 'running' | 'done' | 'error';
+      tools: number;
+      lastTool?: string;
+      result?: string;
+    }
   | { type: 'applied'; changeId: string; path: string; summary: string }
   | { type: 'reverted'; changeId: string; path: string }
   | { type: 'status'; kind: 'info' | 'ok' | 'error'; text: string }
@@ -95,6 +122,27 @@ export interface AgentSessionDeps {
   reviewColumn?: vscode.ViewColumn;
   /** another agent session that must not run at the same time */
   isOtherBusy?: () => boolean;
+  /** resolve @-mentions and attach automatically retrieved context to every user message */
+  autoContext?: boolean;
+}
+
+/** A context plan as a panel card. */
+export function planMessage(plan: ContextPlan, auto: boolean): PanelMessage {
+  return {
+    type: 'contextPlan',
+    auto,
+    query: plan.query,
+    budget: plan.budget,
+    used: plan.used,
+    considered: plan.filesConsidered,
+    items: plan.items.map(it => ({
+      path: it.path,
+      lines: `${it.startLine}-${it.endLine}`,
+      name: it.name,
+      tokens: it.tokens,
+      reasons: it.reasons.join('; '),
+    })),
+  };
 }
 
 /** How a send() ended. */
@@ -240,7 +288,8 @@ export class AgentSession {
       }
       const sessionId = this.sessionId;
 
-      let input: TurnInput[] = [{ type: 'user.message', content: text }];
+      const content = this.d.autoContext && !options.scope ? await this.withContext(text) : text;
+      let input: TurnInput[] = [{ type: 'user.message', content }];
       for (let round = 0; round < 100; round++) {
         const { approvals, turnId } = await this.consume(
           this.d.client.streamTurn(sessionId, input, controller.signal),
@@ -382,6 +431,99 @@ export class AgentSession {
     return deny(answer === null ? 'The user stopped the run.' : 'The user denied this action.');
   }
 
+  /**
+   * Context assembly for a chat message: explicit @file/@symbol mentions first, then code the
+   * editor retrieves automatically for the user's own words, each within its token budget.
+   */
+  private async withContext(text: string): Promise<string> {
+    const cfg = vscode.workspace.getConfiguration('forgeAgent');
+    const parts = [text];
+    try {
+      const m = await resolveMentions(text, cfg.get<number>('mentionBudgetTokens', 3000));
+      if (m.mentions.length) {
+        this.d.post({ type: 'mentions', items: m.mentions });
+      }
+      if (m.attachment) {
+        parts.push(m.attachment);
+      }
+    } catch (err) {
+      this.d.log(`@-mentions failed: ${errorMessage(err)}`);
+    }
+    const autoBudget = cfg.get<number>('autoContextTokens', 2500);
+    if (autoBudget > 0) {
+      try {
+        this.d.post({ type: 'status', kind: 'info', text: 'Retrieving relevant code for your request…' });
+        const plan = await retrieveContext(text, autoBudget);
+        if (plan.items.length) {
+          this.d.post(planMessage(plan, true));
+          parts.push(
+            'Automatically retrieved context for this request (ranked by the editor within a token budget; ' +
+              'use it before reading more):\n' +
+              renderPlan(plan),
+          );
+        }
+      } catch (err) {
+        this.d.log(`automatic retrieval failed: ${errorMessage(err)}`);
+      }
+    }
+    return parts.join('\n\n');
+  }
+
+  /** Sub-agents (e.g. the scout): show them starting, their tool calls, and their result. */
+  private readonly subagents = new Map<string, { name: string; task: string; calls: Set<string>; lastTool?: string }>();
+
+  private trackSubagent(ev: TurnEvent, threadId: string): void {
+    const post = (state: 'running' | 'done' | 'error', result?: string): void => {
+      const s = this.subagents.get(threadId);
+      if (s) {
+        this.d.post({
+          type: 'subagent',
+          threadId,
+          name: s.name,
+          task: s.task,
+          state,
+          tools: s.calls.size,
+          lastTool: s.lastTool,
+          result,
+        });
+      }
+    };
+    if (ev.type === 'thread.created') {
+      const info = (ev.agent_info ?? {}) as { name?: string; input?: string };
+      const title = typeof ev.title === 'string' ? ev.title : '';
+      this.subagents.set(threadId, {
+        name: info.name || title || 'sub-agent',
+        task: (info.input ?? '').slice(0, 600),
+        calls: new Set(),
+      });
+      post('running');
+      return;
+    }
+    const s = this.subagents.get(threadId);
+    if (!s) {
+      return;
+    }
+    if ((ev.type === 'model.message' || ev.type === 'model.message.delta') && Array.isArray(ev.tool_calls)) {
+      let changed = false;
+      for (const c of ev.tool_calls as ToolCallDelta[]) {
+        if (c.id && !s.calls.has(c.id)) {
+          s.calls.add(c.id);
+          changed = true;
+        }
+        if (c.function?.name) {
+          s.lastTool = c.function.name;
+        }
+      }
+      if (changed) {
+        post('running');
+      }
+    } else if (ev.type === 'thread.done') {
+      const state = (ev.state ?? {}) as { status?: string; output?: { content?: unknown }; message?: string };
+      const content = typeof state.output?.content === 'string' ? state.output.content : state.message ?? '';
+      post(state.status === 'done' ? 'done' : 'error', content.slice(0, 1500));
+    }
+  }
+
   /** Fallback: find a tool call's name/arguments in the turn's stored events. */
   private async lookupCall(sessionId: string, turnId: string | undefined, ref: ApprovalRef): Promise<ToolCallState | undefined> {
     if (!turnId) {
@@ -450,6 +592,9 @@ export class AgentSession {
 
     for await (const ev of events) {
       const thread = ev.thread_id;
+      if (typeof thread === 'string' && thread !== 'main') {
+        this.trackSubagent(ev, thread);
+      }
       switch (ev.type) {
         case 'turn.created': {
           if (typeof ev.turn_id === 'string') {

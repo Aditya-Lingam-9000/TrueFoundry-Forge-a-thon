@@ -107,7 +107,7 @@ export class TrueForgeClient {
   async turnEvents(sessionId: string, turnId: string): Promise<TurnEvent[]> {
     const res = await this.request<{ data?: TurnEvent[] }>(
       'GET',
-      `/api/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/events?order=asc&limit=500`,
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/events?order=asc&limit=100`,
     );
     return res?.data ?? [];
   }

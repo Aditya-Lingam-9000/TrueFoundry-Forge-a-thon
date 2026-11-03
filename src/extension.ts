@@ -7,7 +7,7 @@
  * user's approval before any write or command.
  */
 import * as vscode from 'vscode';
-import { AgentSession, trueforgeUrl, type PanelMessage } from './agent/agentSession';
+import { AgentSession, planMessage, trueforgeUrl, type PanelMessage } from './agent/agentSession';
 import { registerInlineEdit } from './inline/inlineEdit';
 import { CommandRunner } from './mcp/commandRunner';
 import { startEditorMcpServer, type EditorMcpEndpoint } from './mcp/editorServer';
@@ -76,7 +76,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const commands = new CommandRunner(commandOutput);
 
   try {
-    mcpEndpoint = await startEditorMcpServer({ log, changes, commands });
+    mcpEndpoint = await startEditorMcpServer({
+      log,
+      changes,
+      commands,
+      contextBudget: () => vscode.workspace.getConfiguration('forgeAgent').get<number>('contextBudgetTokens', 4000),
+      onContextPlan: plan => panel.post(planMessage(plan, false)),
+    });
   } catch (err) {
     const msg = `Forge Agent could not start its editor MCP server: ${errorMessage(err)}`;
     log(msg);
@@ -100,6 +106,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       panel.post(msg);
     },
     isOtherBusy: () => inlineSession?.isBusy ?? false,
+    autoContext: true,
   });
   // Inline edits: a fresh lean session per edit, reviews open beside the edited file.
   let inlineSink: ((msg: PanelMessage) => void) | undefined;

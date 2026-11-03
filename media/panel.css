@@ -160,6 +160,39 @@ pre.card-command {
 .card.reverted {
   border-left-color: var(--vscode-errorForeground);
 }
+.card.plan {
+  border-left-color: var(--vscode-charts-purple, #a371f7);
+}
+.card.plan summary,
+.card.subagent summary {
+  cursor: pointer;
+}
+.meter {
+  height: 4px;
+  background: var(--vscode-input-background);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  background: var(--vscode-charts-purple, #a371f7);
+}
+.plan-list {
+  margin: 2px 0 0 0;
+  padding-left: 18px;
+  font-size: 0.9em;
+}
+.plan-list li {
+  margin-bottom: 3px;
+}
+.plan-path {
+  font-family: var(--vscode-editor-font-family);
+  word-break: break-all;
+}
+.plan-why {
+  opacity: 0.8;
+  font-size: 0.92em;
+}
 textarea {
   width: 100%;
   box-sizing: border-box;

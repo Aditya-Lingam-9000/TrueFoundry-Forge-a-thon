@@ -3,14 +3,35 @@
 // ${ENV_VAR} placeholders are filled from the environment, so keys never live in the repo.
 //
 //   cp config/models.example.json config/models.json   # then edit base URLs, delete unused providers
-//   export FORGE_API_KEY=...                           # keys referenced in the file
-//   node scripts/register-models.mjs [config/models.json] [--trueforge http://127.0.0.1:8790]
+//   node scripts/register-models.mjs [config/models.json] [--env ../.env] [--trueforge http://127.0.0.1:8790]
+// Keys come from the environment, or from a .env file (KEY=value lines) given with --env. Exported
+// variables win over the file. Key values are never printed.
 import { readFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
-const tfIndex = args.indexOf('--trueforge');
-const trueforge = (tfIndex !== -1 ? args.splice(tfIndex, 2)[1] : 'http://127.0.0.1:8790').replace(/\/+$/, '');
+const option = name => {
+  const i = args.indexOf(name);
+  return i === -1 ? undefined : args.splice(i, 2)[1];
+};
+const trueforge = (option('--trueforge') ?? 'http://127.0.0.1:8790').replace(/\/+$/, '');
+const envFile = option('--env');
 const file = args[0] ?? 'config/models.json';
+
+if (envFile) {
+  let text;
+  try {
+    text = readFileSync(envFile, 'utf8');
+  } catch (err) {
+    console.error(`Cannot read ${envFile}: ${err.message}`);
+    process.exit(1);
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (m && !line.trimStart().startsWith('#') && process.env[m[1]] === undefined) {
+      process.env[m[1]] = m[2].replace(/^(['"])(.*)\1$/, '$2');
+    }
+  }
+}
 
 let config;
 try {
@@ -35,13 +56,14 @@ const fill = value =>
 
 let failures = 0;
 for (const provider of config.providers ?? []) {
+  const label = provider.name ?? provider.type;
   if (String(provider.base_url ?? '').includes('<')) {
-    console.log(`- ${provider.name}: skipped (base_url still has a placeholder)`);
+    console.log(`- ${label}: skipped (base_url still has a placeholder)`);
     continue;
   }
   const manifest = fill(provider);
   if (missing.size) {
-    console.log(`- ${provider.name}: skipped (export ${[...missing].join(', ')} first)`);
+    console.log(`- ${label}: skipped (export ${[...missing].join(', ')} first)`);
     missing.clear();
     continue;
   }
@@ -52,10 +74,10 @@ for (const provider of config.providers ?? []) {
   }).catch(err => ({ ok: false, status: 0, text: async () => err.message }));
   if (res.ok) {
     const models = manifest.models.map(m => `${manifest.name ?? manifest.type}/${m.name}`).join(', ');
-    console.log(`- ${provider.name}: registered -> ${models}`);
+    console.log(`- ${label}: registered -> ${models}`);
   } else {
     failures++;
-    console.log(`- ${provider.name}: FAILED (HTTP ${res.status}) ${(await res.text()).slice(0, 300)}`);
+    console.log(`- ${label}: FAILED (HTTP ${res.status}) ${(await res.text()).slice(0, 300)}`);
   }
 }
 process.exit(failures ? 1 : 0);

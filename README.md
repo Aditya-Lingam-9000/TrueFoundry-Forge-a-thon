@@ -50,7 +50,43 @@ VS Code ── Forge Agent extension ──────────────�
   - Progress streams in a cancellable notification and in the agent panel. A failing model shows a
     clear error, and nothing is written.
 
-Next: context retrieval with a budget, model fallback.
+- **Explicit context with @-mentions:** write `@src/flask/cli.py`, `@cli.py` or `@routes_command` in a chat
+  message. The file (whole if short, otherwise its outline) or the symbol's definition is attached
+  within a budget (`forgeAgent.mentionBudgetTokens`), and a 📎 card shows what was resolved.
+- **Automatic context:** for every chat message, the editor ranks the repository against your exact
+  words and attaches the best chunks within `forgeAgent.autoContextTokens` (default 2,500). They show
+  as a 🧭 *Auto context* card.
+- **Context retrieval with a token budget:** `retrieve_context` and `file_outline` (see below). Every
+  plan appears in the panel as a **Context Plan** card, showing the files and line ranges chosen,
+  why each was chosen, and the tokens used against the budget.
+- **Scout sub-agent (TrueForge dynamic sub-agents):** for multi-file tasks the agent delegates
+  discovery to a sub-agent named "scout". It explores with the read-only tools and reports back only
+  `path:lines — why`, so the main agent's context stays small. The scout shows as its own thread in
+  the TrueForge session and as a card in the panel.
+
+Next: model fallback.
+
+### How context is selected
+The repository is larger than the model's context, so the agent never reads it wholesale.
+`retrieve_context(query, budget_tokens)` works in four steps:
+1. **Terms.** Identifiers and keywords from the request (snake/camel parts, light stemming,
+   stop-words removed).
+2. **Candidates.**
+   - Files with ripgrep hits, weighted by how rare each term is across the repository.
+   - Files whose path contains a term.
+   - The tests and docs of the best implementation files (`tests/test_<name>.py`,
+     `docs/<name>.rst`, …).
+3. **Chunks and ranking.** Candidates are split at function/class/heading boundaries, and the chunks
+   are scored with BM25. A chunk scores higher when it defines a matching name, when its path
+   matches, and when it is a test/doc companion.
+4. **Packing.** The best chunk of each top file goes in first, so implementation, tests and docs are
+   all represented. The rest of the budget is then filled by score. Oversized chunks are trimmed to
+   their densest window, and tokens are estimated at about 4 characters each.
+
+The default budget is 4,000 tokens (`forgeAgent.contextBudgetTokens`, at most 4,500, because TrueForge refuses a single tool result over 24,000 characters). The tool result lists every
+chunk with its score and its reasons. After that the agent reads only precise ranges
+(`file_outline`, `read_file` with `start_line`/`end_line`). `read_file` on a file over 250 lines without a range returns the file's outline instead of a page. TrueForge's compaction keeps long
+sessions within the window.
 
 ### How a reviewed edit flows
 ```
@@ -86,16 +122,19 @@ npm run compile
 ```bash
 bash scripts/start-trueforge.sh
 ```
-This runs `npx @truefoundry/trueforge@0.182.0` (pinned) on `http://127.0.0.1:8790` with
-`OUTBOUND_URL_ALLOWED_HOSTS=["127.0.0.1","localhost"]`. TrueForge must be allowed to call the
-extension's MCP server on 127.0.0.1.
+This runs `npx @truefoundry/trueforge@0.182.0` (pinned) on `http://127.0.0.1:8790`.
+- `OUTBOUND_URL_ALLOWED_HOSTS` includes 127.0.0.1, so TrueForge may call the extension's MCP server.
+- It also includes the model API hosts (NVIDIA, Z.ai, Groq, Mistral). On IPv6-only networks with
+  NAT64, these hosts resolve to `64:ff9b::` addresses, which TrueForge's outbound guard otherwise
+  refuses. Add more hosts with `EXTRA_ALLOWED_HOSTS='"api.example.com"'`.
 
 ### 2. Configure a model in TrueForge (terminal 2)
 ```bash
 cp config/models.example.json config/models.json   # git-ignored; edit base URLs, delete unused providers
-export FORGE_API_KEY=...                            # every key the file references as ${VAR}
-node scripts/register-models.mjs
+echo 'NVIDIA_KEY=nvapi-...' >> .env                 # git-ignored; every key the file references as ${VAR}
+node scripts/register-models.mjs --env .env
 ```
+Keys can also be exported instead of written to `.env`. The script never prints them.
 Or add the provider in the TrueForge UI under Settings → Model providers.
 
 ### 3. Run the extension
@@ -125,9 +164,15 @@ sends inline when it creates a session.
 
 ## Model setup
 The extension works with whatever model TrueForge is configured with.
-- During development we serve open models on free Kaggle accelerators behind an authenticated
-  OpenAI-compatible endpoint: Qwen3-Coder-30B on 2×T4 via Ollama, and Qwen3.8-27B on a TPU v5e-8
-  via vLLM.
+- **Default: `nvidia/nemotron-3-5-super`.** This is NVIDIA's Nemotron 3.5 Super VL (120B MoE,
+  12B active) on the free NVIDIA API tier (build.nvidia.com: 40 requests/min).
+  - It reasons before it answers, also when tools are offered, at about 70–220 tokens/s.
+  - Its planning steps can think for several thousand tokens, so the specs set `max_tokens` to 16384.
+    A lower limit can leave an empty answer.
+- **Also registered: `nvidia/minimax-m3-1-flash`.** A fallback; often much slower on the free tier.
+- **Self-hosted alternative:** open models on free Kaggle accelerators behind an authenticated
+  OpenAI-compatible endpoint: Qwen3-Coder-30B on 2×T4 via Ollama, Qwen3.8-27B on a TPU v5e-8 via
+  vLLM. Qwen3-Coder-30B handles single-file edits, but not multi-file tasks.
 - Cost: ₹0.
 - Switching models: change `forgeAgent.model`, or the `model.name` in the agent spec.
 
