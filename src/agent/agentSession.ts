@@ -18,6 +18,8 @@ import { resolveMentions } from '../context/mentions';
 import { renderPlan, type ContextPlan } from '../context/rank';
 import { retrieveContext } from '../context/retrieve';
 import { guardCommand } from '../mcp/checkOnly';
+import { workspaceRoot } from '../mcp/workspace';
+import { doneCheckMessage, findGaps, type RepoFacts, type WorkStep } from './doneCheck';
 import type { EditorMcpEndpoint } from '../mcp/editorServer';
 import type { CommandRunner } from '../mcp/commandRunner';
 import type { ChangeController } from '../review/changeController';
@@ -56,6 +58,7 @@ export type PanelMessage =
       detail?: string;
     }
   | { type: 'approval'; callId: string; title: string; detail: string; state: ApprovalState }
+  | { type: 'doneCheck'; items: string[] }
   | {
       type: 'contextPlan';
       /** true: retrieved by the editor from the user's message; false: the agent called retrieve_context */
@@ -173,6 +176,8 @@ export class AgentSession {
   private sendOptions: SendOptions = {};
   /** how the current send ended (set from turn.done) */
   private outcome: TurnOutcome = { status: 'done' };
+  /** reviewed writes and approved commands of the current send, in order (for the done-check) */
+  private steps: WorkStep[] = [];
 
   constructor(private readonly d: AgentSessionDeps) {}
 
@@ -275,6 +280,7 @@ export class AgentSession {
     const controller = new AbortController();
     this.controller = controller;
     this.callsById = new Map();
+    this.steps = [];
     const started = Date.now();
     if (this.d.oneShot) {
       this.sessionId = null;
@@ -291,6 +297,8 @@ export class AgentSession {
 
       const content = this.d.autoContext && !options.scope ? await this.withContext(text) : text;
       let input: TurnInput[] = [{ type: 'user.message', content }];
+      // Pass 0 is the request; pass 1, if needed, is the done-check follow-up.
+      for (let pass = 0; pass < 2; pass++) {
       for (let round = 0; round < 100; round++) {
         const { approvals, turnId } = await this.consume(
           this.d.client.streamTurn(sessionId, input, controller.signal),
@@ -304,12 +312,33 @@ export class AgentSession {
           kind: 'info',
           text: `Waiting for your decision on ${approvals.length} action(s) — review in the editor / panel.`,
         });
-        const decisions = await Promise.all(approvals.map(ref => this.decide(sessionId, turnId, ref)));
+        // Approvals are decided in parallel, so two proposals for the same file would both be
+        // built against the same original. Review the first; send the others back unreviewed.
+        const seenPaths = new Set<string>();
+        const decisions = await Promise.all(
+          approvals.map(ref => {
+            const call = this.callsById.get(ref.callId);
+            if (call?.name === 'propose_write') {
+              const rel = pathOf(call.args).replace(/^\.\//, '');
+              if (seenPaths.has(rel)) {
+                return Promise.resolve(this.sameFileAgain(ref, rel));
+              }
+              seenPaths.add(rel);
+            }
+            return this.decide(sessionId, turnId, ref);
+          }),
+        );
         if (controller.signal.aborted) {
           await this.denyAndCancel(sessionId, approvals);
           break;
         }
         input = decisions;
+      }
+      const followUp = pass === 0 && !controller.signal.aborted ? this.doneCheck() : undefined;
+      if (!followUp) {
+        break;
+      }
+      input = [{ type: 'user.message', content: followUp }];
       }
       if (controller.signal.aborted) {
         this.outcome = { status: 'stopped' };
@@ -331,6 +360,39 @@ export class AgentSession {
       this.d.post({ type: 'busy', busy: false });
     }
     return this.outcome;
+  }
+
+  /**
+   * After a chat request that changed source files: what a complete change still lacks (tests,
+   * checks after the last write, docs, changelog). Returns the follow-up message, or undefined.
+   */
+  private doneCheck(): string | undefined {
+    if (!this.d.autoContext || this.sendOptions.scope || this.outcome.status !== 'done') {
+      return undefined;
+    }
+    let gaps: string[];
+    try {
+      gaps = findGaps(this.steps, repoFacts());
+    } catch (err) {
+      this.d.log(`done-check failed: ${errorMessage(err)}`);
+      return undefined;
+    }
+    if (gaps.length === 0) {
+      return undefined;
+    }
+    this.d.log(`done-check: ${gaps.length} gap(s)\n  ${gaps.join('\n  ')}`);
+    this.d.post({ type: 'doneCheck', items: gaps });
+    return doneCheckMessage(gaps);
+  }
+
+  /** A second propose_write for a file in the same batch: not reviewed, sent back with the reason. */
+  private sameFileAgain(ref: ApprovalRef, rel: string): TurnInput {
+    const reason =
+      `Another propose_write for ${rel} is in the same message, and the user reviews one change per file at a time. ` +
+      'That other change is being reviewed now. After its result, read the file again and propose this change ' +
+      '(combine several changes to one file in a single call with edits). Nothing was written by this call.';
+    this.d.post({ type: 'review', callId: ref.callId, path: rel, hunks: 0, added: 0, removed: 0, state: 'invalid', detail: reason });
+    return { type: 'user.tool_approval', thread_id: ref.threadId, tool_call_id: ref.callId, approval: { status: 'deny', reason } };
   }
 
   /** Decide one pending approval → the user.tool_approval item for TrueForge. */
@@ -411,6 +473,7 @@ export class AgentSession {
         );
       }
       this.d.changes.recordApproval(args, proposal, hunks, accepted);
+      this.steps.push({ kind: 'write', path: proposal.rel });
       this.d.post({ ...summary, state: n === hunks.length ? 'accepted' : 'partial', detail: `${n}/${hunks.length} hunks accepted` });
       return allow();
     }
@@ -427,6 +490,9 @@ export class AgentSession {
       state: answer === null ? 'cancelled' : answer ? 'allowed' : 'denied',
     });
     if (answer) {
+      if (call.name === 'run_command') {
+        this.steps.push({ kind: 'command', command: commandOf(call.args) });
+      }
       return allow();
     }
     return deny(answer === null ? 'The user stopped the run.' : 'The user denied this action.');
@@ -451,7 +517,9 @@ export class AgentSession {
       this.d.log(`@-mentions failed: ${errorMessage(err)}`);
     }
     const autoBudget = cfg.get<number>('autoContextTokens', 2500);
-    if (autoBudget > 0) {
+    // Short follow-ups ("continue", "yes", "try again") carry no search terms worth ranking.
+    const words = text.trim().split(/\s+/).filter(Boolean).length;
+    if (autoBudget > 0 && words >= 3) {
       try {
         this.d.post({ type: 'status', kind: 'info', text: 'Retrieving relevant code for your request…' });
         const plan = await retrieveContext(text, autoBudget);
@@ -771,6 +839,39 @@ function pathOf(args: string): string {
   } catch {
     return '(unknown file)';
   }
+}
+
+function commandOf(args: string): string {
+  try {
+    const v = JSON.parse(args) as { command?: unknown };
+    return typeof v.command === 'string' ? guardCommand(v.command).command : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Facts about the open repository that decide which done-check items apply. */
+function repoFacts(): RepoFacts {
+  const root = workspaceRoot();
+  const rootFiles = fs.readdirSync(root);
+  const read = (name: string): string => {
+    try {
+      return fs.readFileSync(path.join(root, name), 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  const linterFile = rootFiles.some(f =>
+    /^(?:\.pre-commit-config\.ya?ml|ruff\.toml|\.ruff\.toml|\.flake8|\.pylintrc|\.eslintrc.*|eslint\.config\..*|\.prettierrc.*|biome\.json)$/.test(f),
+  );
+  const linterConfig =
+    /\[tool\.(?:ruff|black|isort|mypy|pylint|flake8)|\[flake8\]/.test(read('pyproject.toml') + read('setup.cfg') + read('tox.ini')) ||
+    /"(?:eslint|prettier|@biomejs\/biome)"/.test(read('package.json'));
+  return {
+    rootFiles,
+    hasDocs: rootFiles.includes('docs') || rootFiles.includes('doc'),
+    hasLinter: linterFile || linterConfig,
+  };
 }
 
 function describeCommand(args: string): string {

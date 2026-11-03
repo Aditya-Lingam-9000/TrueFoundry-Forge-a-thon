@@ -47,6 +47,11 @@ VS Code ── Forge Agent extension ──────────────�
     `pre-commit run` are refused.
 - **Project conventions:** the agent also updates every place where similar features are listed
   (API reference, changelog), and runs the project's linters on the files it changed before it answers.
+- **Done-check (enforced by the editor, not left to the model):** when a chat request changed source
+  files and the agent says it is finished, the editor checks what was actually done.
+  - It checks for a changed test, tests and linters run after the last write, a docs change, and
+    the changelog when the project keeps one.
+  - The gaps go back to the agent once, as a 🔎 card: it fixes each one or says why it does not apply.
 - **Inline edit (Cmd/Ctrl+I, or right-click → Forge Agent: Inline Edit…):** select code, type an
   instruction, review the diff beside the file, accept or reject each hunk.
   - Each inline edit is one fresh, lean TrueForge session ([`agent/inline-edit.json`](agent/inline-edit.json)).

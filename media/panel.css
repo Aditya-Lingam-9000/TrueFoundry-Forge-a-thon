@@ -163,6 +163,9 @@ pre.card-command {
 .card.plan {
   border-left-color: var(--vscode-charts-purple, #a371f7);
 }
+.card.donecheck {
+  border-left-color: var(--vscode-charts-yellow, #d29922);
+}
 .card.plan summary,
 .card.subagent summary {
   cursor: pointer;

@@ -274,6 +274,8 @@ function buildServer(deps: EditorToolDeps): McpServer {
         path: z.string().describe('Workspace-relative path of the file to change or create'),
         old_text: z.string().optional().describe('Exact current lines to replace (must match exactly once)'),
         new_text: z.string().optional().describe('Replacement for old_text'),
+        old_string: z.string().optional().describe('Same as old_text'),
+        new_string: z.string().optional().describe('Same as new_text'),
         edits: z
           .union([z.array(EDIT_SCHEMA), EDIT_SCHEMA, z.string()])
           .optional()
@@ -303,7 +305,8 @@ function buildServer(deps: EditorToolDeps): McpServer {
         'Run a shell command in the workspace (for example tests: "uv run --frozen pytest tests/test_cli.py -q"). ' +
         'The user approves the exact command first. Returns the exit code and the output (long output is trimmed). ' +
         'Never use it to edit files: use propose_write. Linters and formatters always run in check mode ' +
-        '(ruff check --no-fix, ruff format --check, black --check, ...); git checkout/clean/reset/restore/stash ' +
+        '(ruff check --no-fix, ruff format --check, black --check, ...). Commands that create, move or delete files or change ' +
+        'directory, git checkout/clean/reset/restore/stash ' +
         'and pre-commit run are refused.',
       inputSchema: {
         command: z.string().min(1).describe('The command line to run'),

@@ -90,13 +90,39 @@ export function normalizeProposeArgs(value: unknown): ProposeWriteArgs {
     }
     edits.push({ old_text: oldText, new_text: newText });
   });
-  if (typeof v.old_text === 'string' && typeof v.new_text === 'string') {
-    edits.push({ old_text: v.old_text, new_text: v.new_text });
+  const topOld = [v.old_text, v.old_string].find(x => typeof x === 'string');
+  const topNew = [v.new_text, v.new_string].find(x => typeof x === 'string');
+  if (typeof topOld === 'string' && typeof topNew === 'string') {
+    edits.push({ old_text: topOld, new_text: topNew });
   }
   if (edits.length > 0) {
     args.edits = edits;
   }
   return args;
+}
+
+/** Prose and markup files, where re-indenting an existing line is a mistake, not a refactoring. */
+const PROSE_FILE = /\.(?:rst|md|markdown|txt|adoc)$/i;
+
+/**
+ * Models sometimes retype the lines around an insertion and change their spacing (in a changelog,
+ * a list item indented by 5 spaces instead of 4). In prose files that is never intended, so such
+ * an edit is refused with the offending line, before the user has to review it.
+ */
+export function assertNoRespacing(oldText: string, newText: string, rel: string, label = 'old_text'): void {
+  if (!PROSE_FILE.test(rel)) {
+    return;
+  }
+  const newLines = newText.split('\n');
+  const kept = new Set(newLines);
+  for (const line of oldText.split('\n')) {
+    if (line.trim() && !kept.has(line) && newLines.some(n => n !== line && n.trim() === line.trim())) {
+      throw new ProposalError(
+        `${label} changes only the spacing of an existing line in ${rel}: "${line.trim().slice(0, 80)}". ` +
+          'Keep existing lines exactly as they are: repeat them unchanged in new_text and add only the new text.',
+      );
+    }
+  }
 }
 
 export function applyEdits(text: string, edits: EditSpec[], rel: string): string {
@@ -113,6 +139,7 @@ export function applyEdits(text: string, edits: EditSpec[], rel: string): string
       }
     }
     const label = edits.length > 1 ? `edits[${i}]` : 'old_text';
+    assertNoRespacing(oldText, newText, rel, label);
     if (!oldText) {
       throw new ProposalError(`${label} is empty: copy the exact lines to replace from ${rel}.`);
     }

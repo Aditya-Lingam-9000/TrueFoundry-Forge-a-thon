@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import {
   applyEdits,
   argsKey,
+  assertNoRespacing,
   assertWithinSelection,
   MAX_CONTENT_REWRITE_LINES,
   normalizeProposeArgs,
@@ -144,4 +145,19 @@ test('inline: changes outside the selection are refused', () => {
 test('sameCode ignores trailing whitespace and outer blank lines', () => {
   assert.ok(sameCode('a  \nb\n\n', '\na\nb'));
   assert.ok(!sameCode('a\nb', 'a\nc'));
+});
+
+test('top-level old_string / new_string are accepted as old_text / new_text', () => {
+  assert.deepEqual(normalizeProposeArgs({ path: 'a.py', old_string: 'x = 1', new_string: 'x = 2' }).edits, [
+    { old_text: 'x = 1', new_text: 'x = 2' },
+  ]);
+});
+
+test('prose files: re-spacing an existing line is refused; insertions and code re-indents are fine', () => {
+  const entry = '-   The session is marked as accessed\n    but not the values.';
+  const respaced = '-   The session is marked as accessed\n     but not the values.\n\n-   New entry.';
+  assert.throws(() => assertNoRespacing(entry, respaced, 'CHANGES.rst'), /spacing of an existing line/);
+  assert.throws(() => applyEdits(entry + '\n', [{ old_text: entry, new_text: respaced }], 'CHANGES.rst'), /spacing/);
+  assert.doesNotThrow(() => assertNoRespacing(entry, entry + '\n\n-   New entry.', 'CHANGES.rst'));
+  assert.doesNotThrow(() => assertNoRespacing('x = 1', 'if a:\n    x = 1', 'src/a.py'));
 });

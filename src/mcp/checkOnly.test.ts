@@ -41,3 +41,26 @@ test('commands that discard work or rewrite files unreviewed are refused', () =>
   }
   assert.equal(guardCommand('git status --short').refused, undefined);
 });
+
+test('commands that create, move or delete files, or change directory, are refused', () => {
+  for (const cmd of [
+    'mkdir -p /tmp/configtest && cat > /tmp/configtest/app.py << \'EOF\'\nprint(1)\nEOF',
+    'echo x >> notes.txt',
+    'rm -rf /tmp/configtest',
+    'cd /tmp/x && flask config',
+    'pytest -q | tee out.log',
+    "sed -i '' 's/a/b/' src/a.py",
+    'cp a.py b.py',
+  ]) {
+    assert.ok(guardCommand(cmd).refused, cmd);
+  }
+  for (const cmd of [
+    'uv run --frozen pytest tests/test_cli.py -q 2>&1 | tail -30',
+    'ls uv.lock pyproject.toml 2>/dev/null; which uv 2>/dev/null',
+    'uv run --frozen flask --help 2>&1 | head -40',
+    'FLASK_APP=tests/test_apps/helloworld/hello.py uv run --frozen flask config',
+    "uv run --frozen ruff check --no-fix a.py 2>&1; echo \"---FORMAT---\"",
+  ]) {
+    assert.equal(guardCommand(cmd).refused, undefined, cmd);
+  }
+});

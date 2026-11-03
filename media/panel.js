@@ -120,6 +120,16 @@
     log.appendChild(card);
   }
 
+  function renderDoneCheck(m) {
+    const card = el('div', 'card donecheck');
+    card.appendChild(el('div', 'card-title', '🔎 Done-check (by the editor): sent back to the agent'));
+    const list = el('ol', 'plan-list');
+    for (const item of m.items) list.appendChild(el('li', '', item));
+    card.appendChild(list);
+    log.appendChild(card);
+    scrollDown();
+  }
+
   const subagentCards = new Map(); // threadId -> element
 
   function renderSubagent(m) {
@@ -288,6 +298,9 @@
         break;
       case 'approval':
         renderApproval(m);
+        break;
+      case 'doneCheck':
+        renderDoneCheck(m);
         break;
       case 'applied':
         renderApplied(m);
