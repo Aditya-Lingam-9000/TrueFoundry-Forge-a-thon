@@ -309,7 +309,13 @@ const TEST_PATH = /(^|\/)(tests?|__tests__)\/|(^|\/)test_[^/]+$|_test\.[^/]+$|\.
 /** A request that creates something: only then is the family of existing ones the pattern to follow. */
 const CREATES = /\b(add|adds|adding|new|create|creates|another|implement|introduce)\b/i;
 /** Verb-like affixes shared by unrelated helpers (get_debug_flag, get_load_dotenv): never a family. */
-const GENERIC_AFFIXES = new Set(['get', 'set', 'is', 'has', 'make', 'add', 'create', 'build', 'load', 'init', 'to', 'from', 'with', 'handle', 'do', 'on']);
+const GENERIC_AFFIXES = new Set(
+  (
+    'get set is has make add create build load init to from with handle do on find list show print check ' +
+    'parse read write update delete remove process render format convert compute apply ensure open close save ' +
+    'send call register use run'
+  ).split(' '),
+);
 
 /**
  * Families of existing definitions in implementation files: two or more top-level definitions whose
@@ -359,13 +365,18 @@ export function findFamilies(files: SourceFile[], terms: string[], query: string
       }
       const mention = (line: string): string | undefined =>
         g.members.find(m => new RegExp(`\\b${m}\\b`).test(line) && !new RegExp(`(def|class|function)\\s+${m}\\b`).test(line));
+      // Registration: neighbouring lines that are the same statement for different members
+      // (self.add_command(run_command) / self.add_command(shell_command)), not just two calls nearby.
+      const shape = (line: string, member: string): string => line.replace(new RegExp(`\\b${member}\\b`, 'g'), '§').trim();
       let registeredAt: number | undefined;
       for (let i = 0; i < lines.length && registeredAt === undefined; i++) {
         const a = mention(lines[i]);
         if (a) {
-          const near = lines.slice(i + 1, i + 3).map(mention);
-          if (near.some(b => b && b !== a)) {
-            registeredAt = i;
+          for (const j of [i + 1, i + 2]) {
+            const b = j < lines.length ? mention(lines[j]) : undefined;
+            if (b && b !== a && shape(lines[i], a) === shape(lines[j], b)) {
+              registeredAt = i;
+            }
           }
         }
       }

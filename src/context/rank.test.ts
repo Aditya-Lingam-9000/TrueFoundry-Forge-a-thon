@@ -234,6 +234,17 @@ test('questions and generic prefixes never make a family', () => {
   assert.deepEqual(findFamilies(files, extractTerms(generic), generic), []);
 });
 
+test('two members merely called near each other are not a registration; common verbs are not a kind', () => {
+  const CLI = [
+    'def find_best_app(module):', '    pass', '', 'def find_app_by_string(module, name):', '    pass', '',
+    'def locate_app(module, name):', '    if name is None:', '        app = find_best_app(module)', '    else:',
+    '        app = find_app_by_string(module, name)', '',
+  ].join('\n');
+  const files: SourceFile[] = [{ path: 'src/flask/cli.py', text: CLI }];
+  const q = 'Add a new built-in command. Find existing similar commands and their tests.';
+  assert.deepEqual(findFamilies(files, extractTerms(q), q), []);
+});
+
 test("the project's own name is not a kind, and unregistered look-alikes give way to a registered family", () => {
   const TESTING_PY = ['class FlaskClient:', '    pass', '', 'class FlaskCliRunner:', '    pass', ''].join('\n');
   const files: SourceFile[] = [...FILES, { path: 'src/flask/testing.py', text: TESTING_PY }];

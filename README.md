@@ -36,6 +36,8 @@ VS Code ── Forge Agent extension ──────────────�
     diff, with ✓ Accept / ✗ Reject above each hunk (plus Accept all / Reject all / side-by-side).
   - The decisions go back to TrueForge as approvals. Only the accepted hunks are written, as one
     atomic edit, and the agent is told exactly which hunks were rejected.
+  - Several proposals for one file in the same step become one review with all their hunks. If
+    their edits conflict, the first is reviewed and the others go back to the agent.
   - Undo with Cmd/Ctrl+Z in the file, or with **Forge Agent: Revert Last Agent Change** (also works
     after saving).
 - **`run_command`** (e.g. tests, linters), approved per command in the panel, with live output in the
@@ -75,6 +77,12 @@ VS Code ── Forge Agent extension ──────────────�
   discovery to a sub-agent named "scout". It explores with the read-only tools and reports back only
   `path:lines — why`, so the main agent's context stays small. The scout shows as its own thread in
   the TrueForge session and as a card in the panel.
+  - For a chat request that creates something across several files (it mentions tests or docs, or a
+    sibling pattern was found), the editor ends the message with the exact first step. That step is
+    a `create_sub_agent` call with the request word for word, plus the scout's brief: start with
+    `retrieve_context`, at most 8 tool calls.
+  - A rule in the system prompt alone was followed only some of the time; the latest user message
+    is followed far more reliably.
 
 - **Automatic model fallback (Task C).** TrueForge has no model fallback, so the editor drives it.
   - A model error before anything was written: an invalid key, an unreachable endpoint, or a rate

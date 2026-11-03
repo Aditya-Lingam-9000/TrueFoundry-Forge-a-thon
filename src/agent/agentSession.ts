@@ -21,6 +21,7 @@ import { guardCommand } from '../mcp/checkOnly';
 import { workspaceRoot } from '../mcp/workspace';
 import { doneCheckMessage, findGaps, type RepoFacts, type WorkStep } from './doneCheck';
 import { isModelFailure, modelChain, nextAction, shortReason } from './fallback';
+import { scoutKickoff } from './kickoff';
 import type { EditorMcpEndpoint } from '../mcp/editorServer';
 import type { CommandRunner } from '../mcp/commandRunner';
 import type { ChangeController } from '../review/changeController';
@@ -37,7 +38,7 @@ import {
 import type { ReviewManager } from '../review/reviewManager';
 import { errorMessage, TrueForgeClient, type ToolCallDelta, type TurnEvent, type TurnInput } from '../trueforge/client';
 
-export type ReviewState = 'pending' | 'accepted' | 'partial' | 'rejected' | 'invalid' | 'cancelled';
+export type ReviewState = 'pending' | 'accepted' | 'partial' | 'rejected' | 'invalid' | 'cancelled' | 'merged';
 export type ApprovalState = 'pending' | 'allowed' | 'denied' | 'cancelled';
 
 /** Messages the extension sends to the panel webview. */
@@ -341,20 +342,34 @@ export class AgentSession {
           kind: 'info',
           text: `Waiting for your decision on ${approvals.length} action(s) — review in the editor / panel.`,
         });
-        // Approvals are decided in parallel, so two proposals for the same file would both be
-        // built against the same original. Review the first; send the others back unreviewed.
-        const seenPaths = new Set<string>();
+        // Approvals are decided in parallel, so several proposals for one file would each be built
+        // against the same original. They are merged into one review (the first call's); the
+        // others are answered with that, or sent back if their edits cannot be combined.
+        const byFile = new Map<string, ApprovalRef[]>();
+        for (const ref of approvals) {
+          const call = this.callsById.get(ref.callId);
+          if (call?.name === 'propose_write') {
+            const rel = pathOf(call.args).replace(/^\.\//, '');
+            byFile.set(rel, [...(byFile.get(rel) ?? []), ref]);
+          }
+        }
+        const merges = new Map<string, Promise<boolean>>();
         const decisions = await Promise.all(
-          approvals.map(ref => {
+          approvals.map(async ref => {
             const call = this.callsById.get(ref.callId);
-            if (call?.name === 'propose_write') {
-              const rel = pathOf(call.args).replace(/^\.\//, '');
-              if (seenPaths.has(rel)) {
-                return Promise.resolve(this.sameFileAgain(ref, rel));
-              }
-              seenPaths.add(rel);
+            const rel = call?.name === 'propose_write' ? pathOf(call.args).replace(/^\.\//, '') : undefined;
+            const group = rel !== undefined ? (byFile.get(rel) ?? []) : [];
+            if (rel === undefined || group.length < 2) {
+              return this.decide(sessionId, turnId, ref);
             }
-            return this.decide(sessionId, turnId, ref);
+            if (group[0] !== ref) {
+              const merged = await (merges.get(rel) ?? Promise.resolve(false));
+              return merged ? this.mergedAway(ref, rel) : this.sameFileAgain(ref, rel);
+            }
+            let done: (merged: boolean) => void = () => {};
+            merges.set(rel, new Promise<boolean>(resolve => (done = resolve)));
+            const extra = group.slice(1).map(r => this.callsById.get(r.callId)?.args ?? '');
+            return this.decide(sessionId, turnId, ref, { extra, done });
           }),
         );
         if (controller.signal.aborted) {
@@ -517,6 +532,40 @@ export class AgentSession {
     return doneCheckMessage(gaps);
   }
 
+  /**
+   * The proposal of the first propose_write for a file with the edits of the batch's other calls for
+   * that file appended (applied in order to the same original), or undefined if they cannot be
+   * combined (a full-content write, or an edit that no longer matches).
+   */
+  private async mergedProposal(
+    args: ProposeWriteArgs,
+    extra: string[],
+    setMerged: (merged: boolean) => void,
+  ): Promise<Proposal | undefined> {
+    try {
+      const others = extra.map(a => parseProposeArgs(a));
+      if (args.content !== undefined || !args.edits?.length || others.some(o => o.content !== undefined || !o.edits?.length)) {
+        return undefined;
+      }
+      const proposal = await buildProposal({ ...args, edits: [...args.edits, ...others.flatMap(o => o.edits ?? [])] });
+      setMerged(true);
+      return proposal;
+    } catch (err) {
+      this.d.log(`same-file proposals not merged: ${errorMessage(err)}`);
+      return undefined;
+    }
+  }
+
+  /** A later propose_write for a file whose edits went into the first call's review. */
+  private mergedAway(ref: ApprovalRef, rel: string): TurnInput {
+    const reason =
+      `This change was merged into the review of the first propose_write for ${rel} in this message: the user ` +
+      `reviewed all changes to ${rel} together, and that call's result says which hunks were applied. ` +
+      'Do not propose this change again.';
+    this.d.post({ type: 'review', callId: ref.callId, path: rel, hunks: 0, added: 0, removed: 0, state: 'merged' });
+    return { type: 'user.tool_approval', thread_id: ref.threadId, tool_call_id: ref.callId, approval: { status: 'deny', reason } };
+  }
+
   /** A second propose_write for a file in the same batch: not reviewed, sent back with the reason. */
   private sameFileAgain(ref: ApprovalRef, rel: string): TurnInput {
     const reason =
@@ -528,7 +577,27 @@ export class AgentSession {
   }
 
   /** Decide one pending approval → the user.tool_approval item for TrueForge. */
-  private async decide(sessionId: string, turnId: string | undefined, ref: ApprovalRef): Promise<TurnInput> {
+  private async decide(
+    sessionId: string,
+    turnId: string | undefined,
+    ref: ApprovalRef,
+    merge?: { extra: string[]; done: (merged: boolean) => void },
+  ): Promise<TurnInput> {
+    let merged = false;
+    try {
+      return await this.decideOne(sessionId, turnId, ref, merge, ok => (merged = ok));
+    } finally {
+      merge?.done(merged);
+    }
+  }
+
+  private async decideOne(
+    sessionId: string,
+    turnId: string | undefined,
+    ref: ApprovalRef,
+    merge: { extra: string[] } | undefined,
+    setMerged: (merged: boolean) => void,
+  ): Promise<TurnInput> {
     const allow = (): TurnInput => ({
       type: 'user.tool_approval',
       thread_id: ref.threadId,
@@ -561,7 +630,7 @@ export class AgentSession {
           }
           assertWithinSelection(proposal.original, proposal.proposed, scope);
         } else {
-          proposal = await buildProposal(args);
+          proposal = (merge && (await this.mergedProposal(args, merge.extra, setMerged))) || (await buildProposal(args));
         }
       } catch (err) {
         const reason = errorMessage(err);
@@ -651,10 +720,12 @@ export class AgentSession {
     const autoBudget = cfg.get<number>('autoContextTokens', 2500);
     // Short follow-ups ("continue", "yes", "try again") carry no search terms worth ranking.
     const words = text.trim().split(/\s+/).filter(Boolean).length;
+    let patterns: string[] = [];
     if (autoBudget > 0 && words >= 3) {
       try {
         this.d.post({ type: 'status', kind: 'info', text: 'Retrieving relevant code for your request…' });
         const plan = await retrieveContext(text, autoBudget);
+        patterns = plan.patterns;
         if (plan.items.length) {
           this.d.post(planMessage(plan, true));
           parts.push(
@@ -666,6 +737,12 @@ export class AgentSession {
       } catch (err) {
         this.d.log(`automatic retrieval failed: ${errorMessage(err)}`);
       }
+    }
+    // A multi-file creation request starts with the scout sub-agent (see kickoff.ts).
+    const kickoff = scoutKickoff(text, patterns);
+    if (kickoff) {
+      parts.push(kickoff);
+      this.d.post({ type: 'status', kind: 'info', text: 'Multi-file request: the agent is asked to start with a scout sub-agent.' });
     }
     return parts.join('\n\n');
   }

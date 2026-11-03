@@ -24,6 +24,7 @@
     rejected: 'rejected — nothing written',
     invalid: 'could not be prepared — sent back to the agent',
     cancelled: 'cancelled — nothing written',
+    merged: 'merged into the review of the first change to this file',
   };
 
   function button(label, cls, onClick) {
