@@ -5,6 +5,13 @@
  * through TrueForge.
  */
 
+/** The part of a stored model-provider manifest the extension reads. */
+interface ProviderManifest {
+  name?: string;
+  type?: string;
+  models?: Array<{ name?: string; properties?: { max_output_tokens?: unknown } }>;
+}
+
 /** Loosely typed TrueForge turn event: `type` discriminates, the rest is event-specific. */
 export interface TurnEvent {
   type: string;
@@ -98,6 +105,29 @@ export class TrueForgeClient {
     return id;
   }
 
+  /**
+   * Output-token limit that a configured model declares in TrueForge (`<provider>/<model>` →
+   * properties.max_output_tokens), or undefined. TrueForge does not cap max_tokens itself.
+   */
+  async modelOutputLimit(model: string): Promise<number | undefined> {
+    const [provider, name] = [model.slice(0, model.indexOf('/')), model.slice(model.indexOf('/') + 1)];
+    const res = await this.request<{ data?: unknown }>('GET', '/api/v1/settings/model-providers');
+    const items = Array.isArray(res?.data) ? res.data : [];
+    for (const item of items as Array<{ manifest?: ProviderManifest } & ProviderManifest>) {
+      const m = item.manifest ?? item;
+      if ((m.name ?? m.type) === provider) {
+        const limit = m.models?.find(x => x.name === name)?.properties?.max_output_tokens;
+        return typeof limit === 'number' && limit > 0 ? limit : undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /** Replace the inline agent spec of a session, e.g. to switch its model (PATCH /api/v1/sessions/{id}). */
+  async updateSessionSpec(sessionId: string, spec: unknown): Promise<void> {
+    await this.request('PATCH', `/api/v1/sessions/${encodeURIComponent(sessionId)}`, { agent: { spec } });
+  }
+
   /** Cancel whatever is running in the session (idempotent). */
   async cancel(sessionId: string): Promise<void> {
     await this.request('POST', `/api/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, {});
@@ -116,15 +146,21 @@ export class TrueForgeClient {
    * Start a turn and yield its events as they stream in (SSE). `input` is a user message or the
    * batch of approval decisions answering a `tool.approval_required`. Ends after `turn.done` or
    * when the stream closes. `signal` aborts the HTTP stream (the turn itself is cancelled with
-   * cancel()).
+   * cancel()). `previousTurnId` chains the turn to an earlier one ("none": a new root turn);
+   * omitted, TrueForge chains it to the session's last turn.
    */
-  async *streamTurn(sessionId: string, input: TurnInput[], signal: AbortSignal): AsyncGenerator<TurnEvent> {
+  async *streamTurn(
+    sessionId: string,
+    input: TurnInput[],
+    signal: AbortSignal,
+    previousTurnId?: string,
+  ): AsyncGenerator<TurnEvent> {
     let res: Response;
     try {
       res = await fetch(this.url(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-        body: JSON.stringify({ input, stream: true }),
+        body: JSON.stringify(previousTurnId ? { input, stream: true, previous_turn_id: previousTurnId } : { input, stream: true }),
         signal,
       });
     } catch (err) {

@@ -76,7 +76,21 @@ VS Code ── Forge Agent extension ──────────────�
   `path:lines — why`, so the main agent's context stays small. The scout shows as its own thread in
   the TrueForge session and as a card in the panel.
 
-Next: model fallback.
+- **Automatic model fallback (Task C).** TrueForge has no model fallback, so the editor drives it.
+  - A model error before anything was written: an invalid key, an unreachable endpoint, or a rate
+    limit that is still there after one retry 3 s later.
+  - The editor switches the TrueForge session to the next model in `forgeAgent.fallbackModels`
+    (`PATCH /sessions/{id}` with the new model) and sends the request again from the last good
+    turn. The user does nothing.
+  - A ⚠ card in the panel and a toast say which model failed, why, and which one took over.
+    Inline edits (Cmd+I) use the same path.
+  - Every session's `max_tokens` is capped at the output limit its model declares in TrueForge
+    (`max_output_tokens`). A thinking fallback model keeps its full budget, and a free tier that counts
+    requested tokens per minute (Groq) gets a small one.
+  - If every model fails, the user gets one clear message listing each model and its error.
+    Nothing is written before review, so `git status` stays clean.
+  - `node scripts/simulate-failure.mjs invalid-key|unreachable` breaks the primary provider for a
+    demo; `node scripts/register-models.mjs --env ../.env` restores it.
 
 ### How context is selected
 The repository is larger than the model's context, so the agent never reads it wholesale.
@@ -144,6 +158,7 @@ This runs `npx @truefoundry/trueforge@0.182.0` (pinned) on `http://127.0.0.1:879
 ```bash
 cp config/models.example.json config/models.json   # git-ignored; edit base URLs, delete unused providers
 echo 'NVIDIA_KEY=nvapi-...' >> .env                 # git-ignored; every key the file references as ${VAR}
+echo 'GROQ_API_KEY=gsk_...' >> .env                # optional: second fallback vendor
 node scripts/register-models.mjs --env .env
 ```
 Keys can also be exported instead of written to `.env`. The script never prints them.
@@ -172,6 +187,7 @@ sends inline when it creates a session.
 | `forgeAgent.trueforgeUrl` | `http://127.0.0.1:8790` | TrueForge base URL |
 | `forgeAgent.model` | *(empty → spec)* | Model override, `<provider>/<model>` |
 | `forgeAgent.agentDefinition` | *(bundled spec)* | Path to another agent spec |
+| `forgeAgent.fallbackModels` | `nvidia-backup/nemotron-3-5-lightning`, `groq/gpt-oss-120b` | Models that take over automatically, in order |
 | `forgeAgent.mcpServerName` | `forge-editor` | Name of the editor MCP server in TrueForge |
 
 ## Model setup
@@ -181,7 +197,13 @@ The extension works with whatever model TrueForge is configured with.
   - It reasons before it answers, also when tools are offered, at about 70–220 tokens/s.
   - Its planning steps can think for several thousand tokens, so the specs set `max_tokens` to 16384.
     A lower limit can leave an empty answer.
-- **Also registered: `nvidia/minimax-m3-1-flash`.** A fallback; often much slower on the free tier.
+- **Fallback chain** (`forgeAgent.fallbackModels`):
+  1. `nvidia-backup/nemotron-3-5-lightning`: Nemotron 3.5 Lightning (30B MoE, 3B active). It is
+     registered as a separate provider entry, so a broken key or URL on the primary entry does not
+     break it.
+  2. `groq/gpt-oss-120b`: a second vendor. Its free tier allows 8,000 tokens per minute, enough
+     for small edits (Task A), not for long multi-file tasks.
+- `nvidia/minimax-m3-1-flash` is also registered, but it is often very slow on the free tier.
 - **Self-hosted alternative:** open models on free Kaggle accelerators behind an authenticated
   OpenAI-compatible endpoint: Qwen3-Coder-30B on 2×T4 via Ollama, Qwen3.8-27B on a TPU v5e-8 via
   vLLM. Qwen3-Coder-30B handles single-file edits, but not multi-file tasks.

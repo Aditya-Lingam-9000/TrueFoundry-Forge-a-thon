@@ -1,5 +1,5 @@
 {
-  "_comment": "Model providers for TrueForge. Copy to config/models.json (git-ignored), keep the providers you use, put the keys referenced as ${ENV_VAR} in a .env file (or export them), then run: node scripts/register-models.mjs --env <path to .env>. Providers whose key is missing, or whose base_url still has a <placeholder>, are skipped. Keys are never written to this repository.",
+  "_comment": "Model providers for TrueForge. Copy to config/models.json (git-ignored), keep the providers you use, put the keys referenced as ${ENV_VAR} in a .env file (or export them), then run: node scripts/register-models.mjs --env <path to .env>. Providers whose key is missing, or whose base_url still has a <placeholder>, are skipped. Keys are never written to this repository. Fallback (forgeAgent.fallbackModels): nvidia-backup is a separate provider entry, so a broken key or URL on the primary 'nvidia' entry does not break it; groq is a second vendor for small requests (its free tier allows 8,000 tokens per minute).",
   "providers": [
     {
       "type": "custom",
@@ -25,6 +25,24 @@
         {
           "model_id": "minimaxai/minimax-m3.1-flash",
           "name": "minimax-m3-1-flash",
+          "properties": {
+            "context_length": 131072,
+            "max_output_tokens": 16384
+          }
+        }
+      ]
+    },
+    {
+      "type": "custom",
+      "name": "nvidia-backup",
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "auth": {
+        "api_key": "${NVIDIA_KEY}"
+      },
+      "models": [
+        {
+          "model_id": "nvidia/nemotron-3.5-lightning-30b-a3b",
+          "name": "nemotron-3-5-lightning",
           "properties": {
             "context_length": 131072,
             "max_output_tokens": 16384
@@ -61,7 +79,7 @@
           "name": "gpt-oss-120b",
           "properties": {
             "context_length": 131072,
-            "max_output_tokens": 8192
+            "max_output_tokens": 4096
           }
         }
       ]

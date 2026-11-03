@@ -120,6 +120,14 @@
     log.appendChild(card);
   }
 
+  function renderFallback(m) {
+    const card = el('div', 'card fallback');
+    card.appendChild(el('div', 'card-title', '⚠ Model fallback: ' + m.from + ' failed → switched to ' + m.to + ' automatically'));
+    card.appendChild(el('div', 'card-detail', m.reason));
+    log.appendChild(card);
+    scrollDown();
+  }
+
   function renderDoneCheck(m) {
     const card = el('div', 'card donecheck');
     card.appendChild(el('div', 'card-title', '🔎 Done-check (by the editor): sent back to the agent'));
@@ -302,6 +310,9 @@
       case 'doneCheck':
         renderDoneCheck(m);
         break;
+      case 'fallback':
+        renderFallback(m);
+        break;
       case 'applied':
         renderApplied(m);
         break;
@@ -318,8 +329,13 @@
         renderReverted(m);
         break;
       case 'status':
-        setStatus(m.kind, m.text);
-        if (m.kind === 'error') log.appendChild(el('div', 'msg error', m.text));
+        if (m.kind === 'error') {
+          // The full error goes into the conversation; the status line only points to it.
+          log.appendChild(el('div', 'msg error', m.text));
+          setStatus('error', 'Failed — details above.');
+        } else {
+          setStatus(m.kind, m.text);
+        }
         break;
       case 'busy':
         setBusy(m.busy);

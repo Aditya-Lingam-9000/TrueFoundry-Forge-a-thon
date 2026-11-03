@@ -100,6 +100,17 @@
           "default": "",
           "description": "Model as `<provider>/<model>` configured in TrueForge (e.g. nvidia/nemotron-3-5-super). Empty = the model in the agent definition."
         },
+        "forgeAgent.fallbackModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "nvidia-backup/nemotron-3-5-lightning",
+            "groq/gpt-oss-120b"
+          ],
+          "description": "Models (`<provider>/<model>` configured in TrueForge) that take over automatically, in order, when the current model fails (invalid key, unreachable endpoint, rate limit after one retry). Use a different provider than the primary model."
+        },
         "forgeAgent.agentDefinition": {
           "type": "string",
           "default": "",
@@ -143,7 +154,7 @@
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "esbuild src/review/diff.test.ts src/review/edits.test.ts src/context/rank.test.ts src/mcp/checkOnly.test.ts src/agent/doneCheck.test.ts --bundle --platform=node --format=cjs --outdir=dist/test --entry-names=[name] --log-level=warning && node --test dist/test/diff.test.js dist/test/edits.test.js dist/test/rank.test.js dist/test/checkOnly.test.js dist/test/doneCheck.test.js",
+    "test": "esbuild src/review/diff.test.ts src/review/edits.test.ts src/context/rank.test.ts src/mcp/checkOnly.test.ts src/agent/doneCheck.test.ts src/agent/fallback.test.ts --bundle --platform=node --format=cjs --outdir=dist/test --entry-names=[name] --log-level=warning && node --test dist/test/diff.test.js dist/test/edits.test.js dist/test/rank.test.js dist/test/checkOnly.test.js dist/test/doneCheck.test.js dist/test/fallback.test.js",
     "check": "npm run typecheck && npm run compile && npm test"
   },
   "dependencies": {

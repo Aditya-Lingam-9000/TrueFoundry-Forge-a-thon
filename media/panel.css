@@ -163,6 +163,7 @@ pre.card-command {
 .card.plan {
   border-left-color: var(--vscode-charts-purple, #a371f7);
 }
+.card.fallback,
 .card.donecheck {
   border-left-color: var(--vscode-charts-yellow, #d29922);
 }

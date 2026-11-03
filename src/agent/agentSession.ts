@@ -20,6 +20,7 @@ import { retrieveContext } from '../context/retrieve';
 import { guardCommand } from '../mcp/checkOnly';
 import { workspaceRoot } from '../mcp/workspace';
 import { doneCheckMessage, findGaps, type RepoFacts, type WorkStep } from './doneCheck';
+import { isModelFailure, modelChain, nextAction, shortReason } from './fallback';
 import type { EditorMcpEndpoint } from '../mcp/editorServer';
 import type { CommandRunner } from '../mcp/commandRunner';
 import type { ChangeController } from '../review/changeController';
@@ -59,6 +60,7 @@ export type PanelMessage =
     }
   | { type: 'approval'; callId: string; title: string; detail: string; state: ApprovalState }
   | { type: 'doneCheck'; items: string[] }
+  | { type: 'fallback'; from: string; to: string; reason: string }
   | {
       type: 'contextPlan';
       /** true: retrieved by the editor from the user's message; false: the agent called retrieve_context */
@@ -178,6 +180,10 @@ export class AgentSession {
   private outcome: TurnOutcome = { status: 'done' };
   /** reviewed writes and approved commands of the current send, in order (for the done-check) */
   private steps: WorkStep[] = [];
+  /** model the current session runs on (it changes when the editor falls back to another model) */
+  private model: string | null = null;
+  /** last turn of the session that did not fail: a retried request is chained to it */
+  private lastGoodTurnId: string | undefined;
 
   constructor(private readonly d: AgentSessionDeps) {}
 
@@ -197,6 +203,7 @@ export class AgentSession {
   async reset(): Promise<void> {
     await this.stop();
     this.sessionId = null;
+    this.model = null;
     this.d.post({ type: 'session', id: null, url: null, model: this.loadSpec().model.name });
   }
 
@@ -288,8 +295,10 @@ export class AgentSession {
     try {
       await this.registerMcpServer();
       if (!this.sessionId) {
-        const spec = this.loadSpec();
+        const spec = await this.fitToModel(this.loadSpec());
         this.sessionId = await this.d.client.createSession(spec, { 'tfg.source': 'ui', client: 'forge-agent-vscode' });
+        this.model = spec.model.name;
+        this.lastGoodTurnId = undefined;
         this.d.log(`created session ${this.sessionId} with model ${spec.model.name}`);
         this.d.post({ type: 'session', id: this.sessionId, url: this.sessionUrl(), model: spec.model.name });
       }
@@ -297,13 +306,30 @@ export class AgentSession {
 
       const content = this.d.autoContext && !options.scope ? await this.withContext(text) : text;
       let input: TurnInput[] = [{ type: 'user.message', content }];
+      let previousTurnId: string | undefined;
+      const recovery: Recovery = { tried: new Set(), retried: false, failures: [] };
+      // Whether any turn of this request succeeded (then a failure resumes it instead of resending it).
+      let progressed = false;
       // Pass 0 is the request; pass 1, if needed, is the done-check follow-up.
       for (let pass = 0; pass < 2; pass++) {
       for (let round = 0; round < 100; round++) {
         const { approvals, turnId } = await this.consume(
-          this.d.client.streamTurn(sessionId, input, controller.signal),
+          this.d.client.streamTurn(sessionId, input, controller.signal, previousTurnId),
           started,
         );
+        previousTurnId = undefined;
+        if (this.outcome.status !== 'error' && turnId) {
+          this.lastGoodTurnId = turnId;
+          progressed = true;
+        }
+        if (!controller.signal.aborted && approvals.length === 0 && this.outcome.status === 'error') {
+          // A failed model call: retry it, or fall back to the next configured model (Task C).
+          const next = await this.recover(sessionId, content, progressed, recovery, controller.signal);
+          if (next) {
+            ({ input, previousTurnId } = next);
+            continue;
+          }
+        }
         if (controller.signal.aborted || approvals.length === 0) {
           break;
         }
@@ -360,6 +386,109 @@ export class AgentSession {
       this.d.post({ type: 'busy', busy: false });
     }
     return this.outcome;
+  }
+
+  /**
+   * Cap max_tokens at the output limit the model declares in TrueForge. A fallback model is often
+   * a smaller or free-tier model (Groq counts requested output tokens against 8,000 tokens per
+   * minute), while a thinking model needs its full budget; each gets its own declared limit.
+   */
+  private async fitToModel(spec: AgentSpec): Promise<AgentSpec> {
+    let limit: number | undefined;
+    try {
+      limit = await this.d.client.modelOutputLimit(spec.model.name);
+    } catch (err) {
+      this.d.log(`could not read the output limit of ${spec.model.name}: ${errorMessage(err)}`);
+    }
+    const params = { ...(spec.model.params ?? {}) };
+    if (limit && (typeof params.max_tokens !== 'number' || params.max_tokens > limit)) {
+      params.max_tokens = limit;
+    }
+    return { ...spec, model: { ...spec.model, params } };
+  }
+
+  /**
+   * After a model failure: retry it once if it looks transient, otherwise switch the session to
+   * the next configured model (PATCH of the inline spec) and send the request again. Returns the
+   * next turn's input, or undefined when nothing more can be tried (the error then stands, with
+   * every model's reason). Nothing is written before review, so the workspace is unchanged.
+   */
+  private async recover(
+    sessionId: string,
+    content: string,
+    progressed: boolean,
+    r: Recovery,
+    signal: AbortSignal,
+  ): Promise<{ input: TurnInput[]; previousTurnId?: string } | undefined> {
+    const message = this.outcome.message ?? '';
+    const primary = this.loadSpec().model.name;
+    const current = this.model ?? primary;
+    const chain = modelChain(primary, fallbackModels());
+    r.tried.add(current);
+    const action = nextAction(message, current, chain, r.tried, r.retried);
+    const reason = shortReason(message);
+    if (!r.failures.some(f => f.startsWith(`${current}:`))) {
+      r.failures.push(`${current}: ${reason}`);
+    }
+    this.d.log(`model failure on ${current} (${reason}) -> ${JSON.stringify(action)}`);
+
+    if (action.kind === 'give-up') {
+      if (isModelFailure(message)) {
+        const text =
+          `No model could answer — ${r.failures.join('; ')}. Nothing was written. ` +
+          (chain.length > 1
+            ? 'Check the providers in TrueForge (Settings → Model providers).'
+            : 'Check the provider in TrueForge (Settings → Model providers), or add a second model to forgeAgent.fallbackModels.');
+        this.outcome = { status: 'error', message: text };
+        this.d.post({ type: 'status', kind: 'error', text });
+      }
+      return undefined;
+    }
+
+    if (action.kind === 'retry') {
+      r.retried = true;
+      this.d.post({
+        type: 'status',
+        kind: 'info',
+        text: `${current} failed (${reason}); retrying in ${Math.round(action.delayMs / 1000)} s…`,
+      });
+      await sleep(action.delayMs, signal);
+      if (signal.aborted) {
+        return undefined;
+      }
+    } else {
+      const base = this.loadSpec();
+      const spec = await this.fitToModel({ ...base, model: { ...base.model, name: action.model } });
+      try {
+        await this.d.client.updateSessionSpec(sessionId, spec);
+      } catch (err) {
+        this.d.log(`switching the session to ${action.model} failed: ${errorMessage(err)}`);
+        return undefined;
+      }
+      r.retried = false;
+      this.model = action.model;
+      this.d.post({ type: 'fallback', from: current, to: action.model, reason });
+      this.d.post({ type: 'session', id: sessionId, url: this.sessionUrl(), model: action.model });
+      void vscode.window.showWarningMessage(
+        `Forge Agent: ${current} failed (${reason}). Switched to ${action.model} automatically.`,
+      );
+    }
+
+    this.outcome = { status: 'done' };
+    if (!progressed) {
+      // Nothing happened yet: send the same request again, chained past the failed turn.
+      return { input: [{ type: 'user.message', content }], previousTurnId: this.lastGoodTurnId ?? 'none' };
+    }
+    return {
+      input: [
+        {
+          type: 'user.message',
+          content:
+            `The previous model call failed (${reason}); you now run on ${this.model ?? current}. ` +
+            'Continue the task from where it stopped. Changes reported as applied in earlier tool results are already in the files.',
+        },
+      ],
+    };
   }
 
   /**
@@ -839,6 +968,32 @@ function pathOf(args: string): string {
   } catch {
     return '(unknown file)';
   }
+}
+
+/** State of the model-failure handling within one send. */
+interface Recovery {
+  /** models that failed in this send */
+  tried: Set<string>;
+  /** the current model already had its retry */
+  retried: boolean;
+  /** "model: reason" of every failure, for the final message */
+  failures: string[];
+}
+
+/** Configured fallback models (`<provider>/<model>`), tried in order after the primary. */
+function fallbackModels(): string[] {
+  const v = vscode.workspace.getConfiguration('forgeAgent').get<unknown>('fallbackModels', []);
+  return Array.isArray(v) ? v.filter((m): m is string => typeof m === 'string') : [];
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }
 
 function commandOf(args: string): string {
