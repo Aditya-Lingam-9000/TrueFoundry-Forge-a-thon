@@ -205,6 +205,7 @@ git clone --branch 3.1.3 https://github.com/pallets/flask.git ../repos/flask-wor
 bash scripts/start-trueforge.sh
 ```
 This runs `npx @truefoundry/trueforge@0.182.0` (pinned) on `http://127.0.0.1:8790`.
+Tested with TrueForge **0.182.0** (pinned) and **0.183.0** (latest on 3 Nov 2026): the same API, and Task A, chat, Stop, errors, model switching and cancel all behave the same. To try another version: `TRUEFORGE_VERSION=0.183.0 bash scripts/start-trueforge.sh`.
 - `OUTBOUND_URL_ALLOWED_HOSTS` includes 127.0.0.1, so TrueForge may call the extension's MCP server.
 - It also includes the model API hosts (NVIDIA, Z.ai, Groq, Mistral). On IPv6-only networks with
   NAT64, these hosts resolve to `64:ff9b::` addresses, which TrueForge's outbound guard otherwise
