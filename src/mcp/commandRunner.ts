@@ -2,6 +2,10 @@
  * Runs shell commands for the run_command tool (only after the user approved the exact command
  * in the agent panel). Output is mirrored to the "Forge Agent: Commands" output channel so the
  * user sees it live; Stop kills whatever is running.
+ *
+ * Commands run through a shell (`$SHELL -lc "…"`), which starts its own children (`sleep 30 && echo`,
+ * pytest workers, …). Killing only the shell would leave those running and keep the output pipe
+ * open, so each command gets its own process group and Stop / timeout kill the whole group.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as vscode from 'vscode';
@@ -34,11 +38,16 @@ export class CommandRunner {
     this.channel.show(true);
 
     return new Promise(resolve => {
-      const child = spawn(shell, args, { cwd: dir, env: { ...process.env, PYTHONUNBUFFERED: '1' } });
+      const child = spawn(shell, args, {
+        cwd: dir,
+        env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        detached: process.platform !== 'win32', // own process group, so the whole tree can be killed
+      });
       this.running.add(child);
       let output = '';
       let timedOut = false;
       let killed = false;
+      let finished = false;
       const append = (chunk: Buffer): void => {
         const text = chunk.toString('utf8');
         this.channel.append(text);
@@ -51,11 +60,11 @@ export class CommandRunner {
       child.stderr?.on('data', append);
 
       const kill = (): void => {
-        if (child.exitCode === null && !child.killed) {
-          child.kill('SIGTERM');
+        if (child.exitCode === null) {
+          killTree(child, 'SIGTERM');
           setTimeout(() => {
-            if (child.exitCode === null) {
-              child.kill('SIGKILL');
+            if (!finished) {
+              killTree(child, 'SIGKILL');
             }
           }, 3000);
         }
@@ -70,7 +79,6 @@ export class CommandRunner {
       };
       signal?.addEventListener('abort', onAbort);
 
-      let finished = false;
       const done = (exitCode: number | null): void => {
         if (finished) {
           return;
@@ -91,13 +99,27 @@ export class CommandRunner {
     });
   }
 
-  /** Kill every running command (Stop). */
+  /** Kill every running command and everything it started (Stop). */
   killAll(): void {
     for (const child of this.running) {
-      if (child.exitCode === null) {
-        child.kill('SIGKILL');
-      }
+      killTree(child, 'SIGKILL');
     }
+  }
+}
+
+/** Signal a command's whole process tree: its process group on macOS/Linux, taskkill /T on Windows. */
+function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid === undefined) {
+    return;
+  }
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      process.kill(-child.pid, signal); // negative pid: the whole process group
+    }
+  } catch {
+    child.kill(signal); // the group is already gone, or not ours: fall back to the shell itself
   }
 }
 
