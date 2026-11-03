@@ -182,6 +182,8 @@ export class AgentSession {
   private sendOptions: SendOptions = {};
   /** how the current send ended (set from turn.done) */
   private outcome: TurnOutcome = { status: 'done' };
+  /** the last request was stopped by the user: the next message says it must not be resumed */
+  private stoppedTask = false;
   /** reviewed writes and approved commands of the current send, in order (for the done-check) */
   private steps: WorkStep[] = [];
   /** model the current session runs on (it changes when the editor falls back to another model) */
@@ -303,12 +305,21 @@ export class AgentSession {
         this.sessionId = await this.d.client.createSession(spec, { 'tfg.source': 'ui', client: 'forge-agent-vscode' });
         this.model = spec.model.name;
         this.lastGoodTurnId = undefined;
+        this.stoppedTask = false; // a new session has nothing to resume
         this.d.log(`created session ${this.sessionId} with model ${spec.model.name}`);
         this.d.post({ type: 'session', id: this.sessionId, url: this.sessionUrl(), model: spec.model.name });
       }
       const sessionId = this.sessionId;
 
-      const content = this.d.autoContext && !options.scope ? await this.withContext(text) : text;
+      let content = this.d.autoContext && !options.scope ? await this.withContext(text) : text;
+      if (this.stoppedTask) {
+        // The session still holds the stopped request; without this the model tends to resume it.
+        content =
+          'Editor note: the user stopped the previous request. Do not continue it unless this message asks you to; ' +
+          'answer only this message.\n\n' +
+          content;
+        this.stoppedTask = false;
+      }
       let input: TurnInput[] = [{ type: 'user.message', content }];
       let previousTurnId: string | undefined;
       const recovery: Recovery = { tried: new Set(), retried: false, failures: [] };
@@ -401,6 +412,9 @@ export class AgentSession {
       this.busy = false;
       this.controller = null;
       this.sendOptions = {};
+      if (this.outcome.status === 'stopped') {
+        this.stoppedTask = true;
+      }
       this.d.post({ type: 'busy', busy: false });
     }
     return this.outcome;
@@ -663,7 +677,7 @@ export class AgentSession {
       });
       if (accepted === null) {
         this.d.post({ ...summary, state: 'cancelled' });
-        return deny('The user stopped the run before reviewing this change. Nothing was written.');
+        return deny('The user stopped the run before reviewing this change. Nothing was written. Do not continue this task unless the user asks again.');
       }
       const n = accepted.filter(Boolean).length;
       if (n === 0) {
@@ -696,7 +710,7 @@ export class AgentSession {
       }
       return allow();
     }
-    return deny(answer === null ? 'The user stopped the run.' : 'The user denied this action.');
+    return deny(answer === null ? 'The user stopped the run. Do not continue this task unless the user asks again.' : 'The user denied this action.');
   }
 
   /**
@@ -829,7 +843,7 @@ export class AgentSession {
         type: 'user.tool_approval',
         thread_id: ref.threadId,
         tool_call_id: ref.callId,
-        approval: { status: 'deny', reason: 'The user stopped the run. Nothing was written.' },
+        approval: { status: 'deny', reason: 'The user stopped the run. Nothing was written. Do not continue this task unless the user asks again.' },
       }),
     );
     const ctl = new AbortController();
